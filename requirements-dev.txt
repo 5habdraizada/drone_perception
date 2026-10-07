@@ -1,0 +1,6 @@
+# Development machine only: tests and exporting backbones (tools/export_backbone.py).
+-r requirements.txt
+pytest
+onnx
+torch
+timm

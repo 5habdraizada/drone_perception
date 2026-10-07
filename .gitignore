@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+.pytest_cache/
+out/
+calib_captures/
+
+# Exported models are regenerated with tools/export_backbone.py; only the default is committed.
+models/*.onnx
+!models/resnet18.onnx

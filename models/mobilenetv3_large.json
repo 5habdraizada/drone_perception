@@ -1,0 +1,20 @@
+{
+  "name": "mobilenetv3_large",
+  "input_size": [
+    352,
+    208
+  ],
+  "stride": 16,
+  "channels": 112,
+  "mean": [
+    0.485,
+    0.456,
+    0.406
+  ],
+  "std": [
+    0.229,
+    0.224,
+    0.225
+  ],
+  "pad": 1
+}

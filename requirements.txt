@@ -1,0 +1,4 @@
+# Runtime: everything the drone computer needs.
+numpy
+opencv-python
+onnxruntime

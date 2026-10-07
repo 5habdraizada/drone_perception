@@ -1,0 +1,15 @@
+{
+  "_note": "Per-camera calibration as provided. Pixel units at width x height. dist = [k1, k2, p1, p2, k3] (OpenCV order) or null. The left camera's distortion is overfit (folds back before the image edges); calibrate_stereo.py detects this and re-estimates it from the stereo captures.",
+  "left": {
+    "description": "camera 1, long lens",
+    "fx": 1718.54, "fy": 1720.12, "cx": 1054.17, "cy": 454.72,
+    "width": 1920, "height": 1080,
+    "dist": [-0.409575236, 7.02761552, -0.0141216060, 0.0201228359, -26.6788786]
+  },
+  "right": {
+    "description": "camera 2, short (wide) lens",
+    "fx": 1175.14, "fy": 1177.06, "cx": 919.18, "cy": 602.39,
+    "width": 1920, "height": 1080,
+    "dist": [-0.19956526, 0.45415573, 0.00144388, -0.00108357, -0.40052569]
+  }
+}
