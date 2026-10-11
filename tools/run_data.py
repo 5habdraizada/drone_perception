@@ -25,9 +25,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from perception.mapping import pose_from_quaternion
+from perception.calibration import Rectifier, StereoCalibration
+from perception.mapping import MapConfig, pose_from_quaternion
 from perception.pipeline import Pipeline
-from perception.terrain import StereoRig
+from perception.terrain import StereoRig, TerrainConfig
 from tools.viz import colourise, label, overlay, regions_bgr
 
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
@@ -108,8 +109,8 @@ def panel(res, height_range) -> np.ndarray:
     return np.hstack(tiles)
 
 
-def main(argv=None) -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def add_data_arguments(ap: argparse.ArgumentParser) -> None:
+    """Options shared by run_data and the viewer: where the data is and how to process it."""
     ap.add_argument("data", help="folder with the stereo data")
     ap.add_argument("--calib", help="stereo calibration JSON (raw images)")
     ap.add_argument("--rig", help="rig JSON for already-rectified images (default: DATA/rig.json)")
@@ -121,36 +122,57 @@ def main(argv=None) -> None:
     ap.add_argument("--fps", type=float, default=10.0, help="frame rate, for timestamps")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--step", type=int, default=1, help="use every n-th frame")
+    ap.add_argument("--height-range", type=float, nargs=2, default=(-1.0, 3.0))
+    ap.add_argument("--min-depth", type=float, default=1.5, help="nearest surface to expect, m (sets the disparity search range)")
+    ap.add_argument("--max-depth", type=float, default=40.0, help="farthest surface to accept, m")
+    ap.add_argument("--map-resolution", type=float, default=0.25, help="map cell size, m")
+
+
+def selected_frames(args):
+    """The stereo frames chosen by --start/--step, as (index, name, left, right)."""
+    for i, name, l_img, r_img in stereo_frames(Path(args.data), args.left, args.right):
+        if i >= args.start and (i - args.start) % args.step == 0:
+            yield i, name, l_img, r_img
+
+
+def poses_for(args) -> dict[int, np.ndarray]:
+    path = Path(args.poses) if args.poses else Path(args.data) / "poses.csv"
+    return load_poses(path) if path.exists() else {}
+
+
+def frame_record(i: int, name: str, res) -> dict:
+    """One frames.csv row: the per-frame measurements and timings."""
+    t = res.terrain
+    nov = res.scene.novelty if res.scene is not None else None
+    return {"frame": i, "name": name, "t": round(res.t, 3),
+            "altitude_m": _r(t.altitude), "tilt_deg": _r(t.tilt_deg),
+            "depth_coverage": _r(t.valid_fraction), "ground_inliers": _r(t.inlier_fraction),
+            "regions": len(res.scene.region_info) if res.scene is not None else "",
+            "novelty_max": _r(np.nanmax(nov)) if nov is not None and np.isfinite(nov).any() else "",
+            "mapped": int(res.mapped), **{f"{k}_ms": _r(v, 1) for k, v in res.timings_ms.items()}}
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_data_arguments(ap)
     ap.add_argument("--max-frames", type=int)
     ap.add_argument("--save-every", type=int, default=10, help="save a panel image every n processed frames")
-    ap.add_argument("--height-range", type=float, nargs=2, default=(-1.0, 3.0))
     ap.add_argument("--out", default="out/run")
     args = ap.parse_args(argv)
 
-    data, out = Path(args.data), Path(args.out)
+    out = Path(args.out)
     (out / "frames").mkdir(parents=True, exist_ok=True)
-    frames = stereo_frames(data, args.left, args.right)
-
-    poses_path = Path(args.poses) if args.poses else data / "poses.csv"
-    poses = load_poses(poses_path) if poses_path.exists() else {}
+    poses = poses_for(args)
     first = None
     pipe = None
     rows, done = [], 0
-    for i, name, l_img, r_img in frames:
-        if i < args.start or (i - args.start) % args.step:
-            continue
+    for i, name, l_img, r_img in selected_frames(args):
         if pipe is None:
-            pipe = _make_pipeline(args, data, l_img)
+            pipe = make_pipeline(args, l_img)
             first = i
         res = pipe.process(i / args.fps, l_img, r_img, poses.get(i))
         t = res.terrain
-        nov = res.scene.novelty if res.scene is not None else None
-        rows.append({"frame": i, "name": name, "t": round(res.t, 3),
-                     "altitude_m": _r(t.altitude), "tilt_deg": _r(t.tilt_deg),
-                     "depth_coverage": _r(t.valid_fraction), "ground_inliers": _r(t.inlier_fraction),
-                     "regions": len(res.scene.region_info) if res.scene is not None else "",
-                     "novelty_max": _r(np.nanmax(nov)) if nov is not None and np.isfinite(nov).any() else "",
-                     "mapped": int(res.mapped), **{f"{k}_ms": _r(v, 1) for k, v in res.timings_ms.items()}})
+        rows.append(frame_record(i, name, res))
         if done % args.save_every == 0:
             cv2.imwrite(str(out / "frames" / f"frame_{i:06d}.png"), panel(res, args.height_range))
         done += 1
@@ -174,13 +196,21 @@ def main(argv=None) -> None:
     print(f"results in {out}/")
 
 
-def _make_pipeline(args, data: Path, l_img: np.ndarray) -> Pipeline:
+def make_pipeline(args, l_img: np.ndarray) -> Pipeline:
+    data = Path(args.data)
     if args.calib:
-        return Pipeline.from_calibration(args.calib, width=args.width, backbone_path=args.model)
+        rect = Rectifier(StereoCalibration.load(args.calib), (args.width, None))
+        return Pipeline(rect.rig, rect.out_size, rectifier=rect, **_configs(args, rect.out_size[0]))
     rig_path = Path(args.rig) if args.rig else data / "rig.json"
     if not rig_path.exists():
         raise SystemExit("raw images need --calib; already-rectified images need --rig or DATA/rig.json")
-    return Pipeline(load_rig(rig_path), (l_img.shape[1], l_img.shape[0]), backbone_path=args.model)
+    return Pipeline(load_rig(rig_path), (l_img.shape[1], l_img.shape[0]), **_configs(args, l_img.shape[1]))
+
+
+def _configs(args, width: int) -> dict:
+    return {"backbone_path": args.model,
+            "terrain_config": TerrainConfig.for_width(width, min_depth=args.min_depth, max_depth=args.max_depth),
+            "map_config": MapConfig(resolution=args.map_resolution)}
 
 
 def _summary(rows, pipe: Pipeline, first: int) -> str:

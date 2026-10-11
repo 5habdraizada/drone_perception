@@ -226,6 +226,125 @@ def per_pair_errors(calib: StereoCalibration, board: BoardSpec,
     return np.array(errs)
 
 
+def rectifying_rotations(r: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+    """(R1, R2, swapped): rotations taking each camera's coordinates into one shared rectified frame
+    whose x axis runs along the baseline (Fusiello's construction), for any mounting, including
+    cameras one behind the other or rotated relative to each other.
+
+    x points from the left to the right camera of the rectified pair, choosing the direction
+    closest to camera 1's own x axis; swapped is True when that makes camera 2 the left one.
+    """
+    centre2 = -np.asarray(r).T @ np.asarray(t).ravel()     # camera 2's centre in camera 1's frame
+    x = centre2 / np.linalg.norm(centre2)
+    swapped = bool(x[0] < 0)
+    if swapped:
+        x = -x
+    z = np.array([0.0, 0.0, 1.0]) + np.asarray(r).T @ np.array([0.0, 0.0, 1.0])  # mean viewing direction
+    y = np.cross(z, x)
+    y /= np.linalg.norm(y)
+    rect = np.stack([x, y, np.cross(x, y)])
+    return rect, rect @ np.asarray(r).T, swapped
+
+
+def refine_extrinsics(calib: StereoCalibration, pairs, max_features: int = 4000,
+                      log=print) -> StereoCalibration:
+    """Re-estimate the cameras' relative rotation and baseline direction from feature matches in
+    ordinary footage, keeping the intrinsics and the baseline length.
+
+    For calibrations that drift (vibration, knocks): pairs are raw (left, right) frames of a
+    textured scene. Needs real parallax, i.e. depth not vastly larger than the baseline.
+    """
+    sift = cv2.SIFT_create(nfeatures=max_features)
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    pts_l, pts_r = [], []
+    for l_img, r_img in pairs:
+        kl, dl = sift.detectAndCompute(_gray(l_img), None)
+        kr, dr = sift.detectAndCompute(_gray(r_img), None)
+        if dl is None or dr is None:
+            continue
+        for m, n in (p for p in matcher.knnMatch(dl, dr, k=2) if len(p) == 2):
+            if m.distance < 0.75 * n.distance:
+                pts_l.append(kl[m.queryIdx].pt)
+                pts_r.append(kr[m.trainIdx].pt)
+    if len(pts_l) < 50:
+        raise ValueError(f"only {len(pts_l)} feature matches; need a textured scene")
+    nl = cv2.undistortPoints(np.float64(pts_l).reshape(-1, 1, 2), calib.left.K, calib.left.dist)
+    nr = cv2.undistortPoints(np.float64(pts_r).reshape(-1, 1, 2), calib.right.K, calib.right.dist)
+    thr = 1.0 / np.mean([calib.left.K[0, 0], calib.right.K[0, 0]])  # ~1 px in normalised units
+    e, mask = cv2.findEssentialMat(nl, nr, np.eye(3), method=cv2.RANSAC, prob=0.9999, threshold=thr)
+    _, r, t, mask = cv2.recoverPose(e, nl, nr, np.eye(3), mask=mask)
+    t = t.ravel() * calib.baseline
+    out = StereoCalibration(calib.left, calib.right, r, t, math.nan, dict(calib.meta))
+
+    inl = mask.ravel() > 0
+    before = _row_error(calib, np.float64(pts_l)[inl], np.float64(pts_r)[inl])
+    after = _row_error(out, np.float64(pts_l)[inl], np.float64(pts_r)[inl])
+    out.meta["refined_extrinsics"] = {"matches": len(pts_l), "inliers": int(inl.sum()),
+                                      "row_error_before_px": before, "row_error_after_px": after}
+    log(f"refine_extrinsics: {inl.sum()}/{len(pts_l)} inlier matches; rectified row error "
+        f"{before:.2f} px -> {after:.2f} px (median, at {out.left.size[0]} px width)")
+    return out
+
+
+def _row_error(calib: StereoCalibration, pts_l: np.ndarray, pts_r: np.ndarray) -> float:
+    """Median |row difference| of matched points after rectifying with `calib` (raw-resolution pixels)."""
+    r1, r2, _ = rectifying_rotations(calib.R, calib.T)
+    k = calib.left.K
+    pl = cv2.undistortPoints(pts_l.reshape(-1, 1, 2), calib.left.K, calib.left.dist, R=r1, P=k).reshape(-1, 2)
+    pr = cv2.undistortPoints(pts_r.reshape(-1, 1, 2), calib.right.K, calib.right.dist, R=r2, P=k).reshape(-1, 2)
+    return float(np.median(np.abs(pl[:, 1] - pr[:, 1])))
+
+
+def _gray(img: np.ndarray) -> np.ndarray:
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+
+
+def _field_polygon(model: CameraModel, r: np.ndarray) -> np.ndarray:
+    """A camera's usable image border (clipped to the distortion model's valid radius),
+    as a polygon in rectified normalised coordinates."""
+    w, h = model.size
+    t = np.linspace(0, 1, 64)[:-1]
+    border = np.concatenate([np.stack([t * (w - 1), np.zeros_like(t)], -1),
+                             np.stack([np.full_like(t, w - 1), t * (h - 1)], -1),
+                             np.stack([(1 - t) * (w - 1), np.full_like(t, h - 1)], -1),
+                             np.stack([np.zeros_like(t), (1 - t) * (h - 1)], -1)])
+    limit = valid_radius(model)
+    if math.isfinite(limit):
+        f, c = np.array([model.K[0, 0], model.K[1, 1]]), model.K[:2, 2]
+        norm = (border - c) / f
+        rad = np.linalg.norm(norm, axis=1, keepdims=True)
+        border = np.where(rad > limit, norm * limit / np.maximum(rad, 1e-12), norm) * f + c
+    return cv2.undistortPoints(border.reshape(-1, 1, 2), model.K, model.dist, R=r).reshape(-1, 2)
+
+
+def _largest_rectangle(inside: np.ndarray, aspects) -> tuple[int, int, int, int] | None:
+    """(r0, c0, r1, c1) of the largest rectangle of one of the given width/height aspects
+    lying entirely inside the mask; candidate centres are the mask's most interior points."""
+    integral = cv2.integral((1 - inside).astype(np.uint8))  # counts of outside pixels
+    outside = lambda r0, c0, r1, c1: integral[r1, c1] - integral[r0, c1] - integral[r1, c0] + integral[r0, c0]
+    dist = cv2.distanceTransform(inside, cv2.DIST_L2, 5)
+    order = np.argsort(dist.ravel())[::-1][:400:20]
+    centres = [np.unravel_index(i, dist.shape) for i in order]
+    ys, xs = np.nonzero(inside)
+    centres.append((int(ys.mean()), int(xs.mean())))
+    hgt, wid = inside.shape
+    best, best_area = None, 0.0
+    for a in aspects:
+        for cy, cx in centres:
+            lo_h, hi_h = 0.0, float(max(hgt, wid))
+            for _ in range(20):  # binary search on the half-height
+                mid = (lo_h + hi_h) / 2
+                r0, r1 = int(cy - mid), int(np.ceil(cy + mid))
+                c0, c1 = int(cx - a * mid), int(np.ceil(cx + a * mid))
+                ok = r0 >= 0 and c0 >= 0 and r1 < hgt and c1 < wid and outside(r0, c0, r1 + 1, c1 + 1) == 0
+                lo_h, hi_h = (mid, hi_h) if ok else (lo_h, mid)
+            area = 4 * a * lo_h * lo_h
+            if lo_h > 0 and area > best_area:
+                best_area = area
+                best = (int(cy - lo_h), int(cx - a * lo_h), int(np.ceil(cy + lo_h)), int(np.ceil(cx + a * lo_h)))
+    return best
+
+
 class Rectifier:
     """Warps raw (left, right) frames into a rectified pair of `out_size`.
 
@@ -234,10 +353,8 @@ class Rectifier:
     is cropped or wasted; with an explicit (w, h) of a different shape, the
     overlap is cropped to fill it.
 
-    The rectified pair is always returned in left-to-right order along the
-    baseline. If camera 2 turns out to sit on the left of camera 1, the
-    outputs are swapped and `swapped` is True; the rectified reference frame is
-    then camera 2's.
+    Any mounting works: the rectified x axis runs along the baseline. The pair is returned
+    left-to-right along it; if that makes camera 2 the left one, `swapped` is True.
     """
 
     def __init__(self, calib: StereoCalibration, out_size: tuple[int, int | None] = (640, None)):
@@ -249,16 +366,8 @@ class Rectifier:
                                  f"recalibrate it (calibrate_stereo.py refines intrinsics automatically): "
                                  + check_model(model)[0])
 
-        # Rotations only depend on R and T, so the shared image size argument is irrelevant here.
-        r1, r2, *_ = cv2.stereoRectify(cl.K, cl.dist, cr.K, cr.dist, cl.size, calib.R,
-                                       calib.T.reshape(3, 1), flags=cv2.CALIB_ZERO_DISPARITY, alpha=0)
-        # Right camera centre, expressed in the rectified frame of camera 1.
-        centre = r1 @ (-calib.R.T @ calib.T)
-        if abs(centre[1]) > abs(centre[0]):
-            raise ValueError("cameras are stacked vertically in the image; terrain.py needs them "
-                             "side by side along image rows (rotate both images 90 degrees)")
-        self.swapped = bool(centre[0] < 0)
-        self.baseline = float(abs(centre[0]))
+        r1, r2, self.swapped = rectifying_rotations(calib.R, calib.T)
+        self.baseline = calib.baseline
 
         # One shared pinhole for both, covering only the view valid in both cameras.
         f, cx, cy, self.out_size = self._common_pinhole([(cl, r1), (cr, r2)], out_size)
@@ -292,34 +401,30 @@ class Rectifier:
 
     @staticmethod
     def _common_pinhole(cams, out_size) -> tuple[float, float, float, tuple[int, int]]:
-        # Inner bounds of each camera's image border after undistortion and rotation,
-        # in normalised rectified coordinates; intersect them over both cameras.
-        x0, y0, x1, y1 = -np.inf, -np.inf, np.inf, np.inf
-        for model, r in cams:
-            w, h = model.size
-            t = np.linspace(0, 1, 64)
-            edges = {
-                "left": np.stack([np.zeros_like(t), t * (h - 1)], -1),
-                "right": np.stack([np.full_like(t, w - 1), t * (h - 1)], -1),
-                "top": np.stack([t * (w - 1), np.zeros_like(t)], -1),
-                "bottom": np.stack([t * (w - 1), np.full_like(t, h - 1)], -1),
-            }
-            # Pull border points that lie beyond the model's valid radius in to it, so
-            # the usable field is the image intersected with the valid disc.
-            limit = valid_radius(model)
-            if math.isfinite(limit):
-                f, c = np.array([model.K[0, 0], model.K[1, 1]]), model.K[:2, 2]
-                for k, pts in edges.items():
-                    norm = (pts - c) / f
-                    rad = np.linalg.norm(norm, axis=1, keepdims=True)
-                    edges[k] = np.where(rad > limit, norm * limit / np.maximum(rad, 1e-12), norm) * f + c
-            n = {k: cv2.undistortPoints(v.reshape(-1, 1, 2), model.K, model.dist, R=r).reshape(-1, 2)
-                 for k, v in edges.items()}
-            x0, x1 = max(x0, n["left"][:, 0].max()), min(x1, n["right"][:, 0].min())
-            y0, y1 = max(y0, n["top"][:, 1].max()), min(y1, n["bottom"][:, 1].min())
-        if not (x1 > x0 and y1 > y0):
+        """Largest axis-aligned rectangle (in rectified normalised coordinates) inside both cameras'
+        valid fields, whatever their orientation, then the pinhole that maps it onto out_size."""
+        polys = [_field_polygon(model, r) for model, r in cams]
+        pts = np.concatenate(polys)
+        lo, hi = pts.min(axis=0), pts.max(axis=0)
+        n = 600
+        scale = (n - 1) / float((hi - lo).max())
+        shape = (int((hi[1] - lo[1]) * scale) + 2, int((hi[0] - lo[0]) * scale) + 2)
+        inside = np.ones(shape, np.uint8)
+        for poly in polys:
+            m = np.zeros(shape, np.uint8)
+            cv2.fillPoly(m, [np.round((poly - lo) * scale).astype(np.int32)], 1)
+            inside &= m
+        inside = cv2.erode(inside, np.ones((3, 3), np.uint8))  # stay clear of the rasterised border
+        if inside.sum() < 100:
             raise ValueError("the two cameras' views do not overlap")
         w, h = out_size
+        aspects = [w / h] if h is not None else np.geomspace(0.4, 4.0, 25)
+        best = _largest_rectangle(inside, aspects)
+        if best is None:
+            raise ValueError("the two cameras' views do not overlap")
+        r0, c0, r1, c1 = best
+        x0, x1 = lo[0] + c0 / scale, lo[0] + c1 / scale
+        y0, y1 = lo[1] + r0 / scale, lo[1] + r1 / scale
         if h is None:
             h = max(16, int(round(w * (y1 - y0) / (x1 - x0) / 16)) * 16)
         # The larger scale fills the output, cropping the overlap along the other axis.

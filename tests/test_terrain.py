@@ -90,6 +90,17 @@ def test_prior_keeps_true_ground_under_big_roof(big_roof):
     assert abs(np.median(terrain.height[roof]) - 1.2) < 0.1
 
 
+def test_stale_prior_far_from_the_data_is_ignored(tilted):
+    # Regression (found on real flight data): a prior far from this frame's ground used to
+    # win the gate on its own and leave the fit with no inliers.
+    _, gt = tilted
+    left, right, _ = render_stereo(default_scene(), RIG, altitude=ALTITUDE, roll_deg=4, pitch_deg=-3)
+    stale = np.append(gt["plane"][:3], ALTITUDE + 3.0)
+    terrain = TerrainEstimator(RIG).process(left, right, plane_prior=stale)
+    assert terrain.plane is not None
+    assert abs(terrain.altitude - ALTITUDE) < 0.1
+
+
 def test_prior_follows_real_attitude_and_altitude_change():
     # Tracking must not lag when the drone genuinely tilts and climbs between frames.
     scene = default_scene()

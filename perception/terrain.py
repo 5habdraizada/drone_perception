@@ -54,6 +54,7 @@ class TerrainConfig:
     edge_window: int = 9            # px; neighbourhood checked for depth steps
     edge_px: float = 0.75           # disparity range within it that marks a step (excluded from the fit)
     prior_weight: float = 0.003     # with a prior: pull towards it, per inlier (ridge strength)
+    prior_min_support: float = 0.05  # with a prior: a gated plane needs this inlier fraction, else ungated
     prior_max_jump_m: float = 0.6   # with a prior: max altitude change between frames
     prior_max_angle_deg: float = 10.0  # with a prior: max ground-normal change between frames
 
@@ -210,18 +211,18 @@ class TerrainEstimator:
 
         normals = -coeffs / np.linalg.norm(coeffs, axis=1, keepdims=True)
         coeffs = coeffs[-normals[:, 2] >= math.cos(math.radians(cfg.max_tilt_deg))]
-        if prior is not None and len(coeffs):
-            # Gate on the previous ground; if nothing passes (ground hidden), fall back to ungated.
+        if len(coeffs) == 0:
+            return None
+        support = (np.abs(s_obs @ coeffs.T - s_d[:, None]) < cfg.inlier_px).sum(axis=0)
+        if prior is not None:
+            # Prefer planes near the previous ground, but only if one of them is actually
+            # supported by this frame's data; otherwise the scene moved on: search freely.
             planes = np.array([self._coeffs_to_plane(cf) for cf in coeffs])
             near = (np.abs(planes[:, 3] - prior[3]) <= cfg.prior_max_jump_m) & (
                 planes[:, :3] @ np.asarray(prior[:3]) >= math.cos(math.radians(cfg.prior_max_angle_deg)))
-            if near.any():
-                coeffs = coeffs[near]
-        if len(coeffs) == 0:
-            return None
-
-        inliers = np.abs(s_obs @ coeffs.T - s_d[:, None]) < cfg.inlier_px
-        return coeffs[np.argmax(inliers.sum(axis=0))]
+            if near.any() and support[near].max() >= cfg.prior_min_support * s_d.size:
+                coeffs, support = coeffs[near], support[near]
+        return coeffs[np.argmax(support)]
 
     def _coeffs_to_plane(self, coeffs: np.ndarray) -> np.ndarray:
         # d_px = -(f*B / D) * (n . ray)  =>  coeffs = -(f*B / D) * n

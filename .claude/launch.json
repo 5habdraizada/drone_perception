@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "viewer-sample",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "tools.viewer", "out/sample_data", "--model", "models/resnet18.onnx", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "viewer-kagaru",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "tools.viewer", "data/kagaru/run", "--calib", "data/kagaru/run/stereo.json",
+                      "--model", "models/resnet18.onnx", "--min-depth", "30", "--max-depth", "200",
+                      "--fps", "30", "--height-range", "-5", "25", "--port", "8001"],
+      "port": 8001
+    }
+  ]
+}

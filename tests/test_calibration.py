@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from perception.calibration import (BoardSpec, CameraModel, Rectifier, StereoCalibration,
-                                    find_board, per_pair_errors, stereo_calibrate)
+                                    find_board, per_pair_errors, refine_extrinsics, stereo_calibrate)
 from perception.terrain import TerrainConfig, TerrainEstimator
 from sim.synthetic_stereo import camera_pose, default_scene, render_view
 
@@ -113,9 +113,45 @@ def test_cameras_mounted_the_other_way_round_are_swapped():
     assert (pl[:, 0] - pr[:, 0]).min() > 0
 
 
-def test_vertically_stacked_cameras_are_rejected():
-    with pytest.raises(ValueError, match="vertically"):
-        Rectifier(_true_calib(right_centre=(0.0, 0.10, 0.0)), (640, 480))
+@pytest.mark.parametrize("centre, roll_deg", [((0.0, 0.10, 0.0), 0.0),    # one above the other
+                                              ((0.0, 0.10, 0.0), 90.0),   # and rotated 90 deg, like Kagaru
+                                              ((0.07, 0.07, 0.0), 30.0)])
+def test_any_mounting_rectifies(centre, roll_deg):
+    calib = _true_calib(right_centre=centre)
+    r = cv2.Rodrigues(np.radians([0.0, 0.0, roll_deg]))[0] @ calib.R
+    calib = StereoCalibration(LEFT, RIGHT, r, -r @ np.asarray(centre))
+    lefts, rights = _observations(calib, noise=0.0)
+    rect = Rectifier(calib, (640, None))
+    pl, pr = rect.rectify_points(np.concatenate(lefts), np.concatenate(rights))
+    assert np.abs(pl[:, 1] - pr[:, 1]).max() < 0.05
+    assert (pl[:, 0] - pr[:, 0]).min() > 0
+    assert rect.baseline == pytest.approx(np.linalg.norm(centre), abs=1e-6)
+
+
+@pytest.mark.slow
+def test_refine_extrinsics_fixes_a_drifted_calibration():
+    # Footage rendered with the true calibration; the "known" calibration has drifted by ~1 deg.
+    half = (960, 540)
+    truth = _true_calib()
+    truth = StereoCalibration(truth.left.scaled(half), truth.right.scaled(half), truth.R, truth.T)
+    scene = default_scene()
+    rng = np.random.default_rng(0)
+    pairs = []
+    for x in (-0.5, 0.5):
+        r_wc, c = camera_pose(5.0, 2.0, -1.0, (x, 0.0))
+        left, _, _ = render_view(scene, truth.left.K, truth.left.dist, half, r_wc, c, rng=rng)
+        right, _, _ = render_view(scene, truth.right.K, truth.right.dist, half, r_wc @ truth.R.T,
+                                  c + r_wc @ (-truth.R.T @ truth.T), rng=rng)
+        pairs.append((left, right))
+    drift = cv2.Rodrigues(np.radians([0.6, -0.5, 0.4]))[0]
+    drifted = StereoCalibration(truth.left, truth.right, drift @ truth.R, drift @ truth.T)
+    fixed = refine_extrinsics(drifted, pairs, log=lambda *_: None)
+    err = lambda c: math.degrees(np.linalg.norm(cv2.Rodrigues(c.R @ truth.R.T)[0]))
+    # What stereo needs is row alignment; rotation about the baseline barely affects it.
+    assert err(drifted) > 0.8 and err(fixed) < 0.25
+    assert fixed.baseline == pytest.approx(truth.baseline)
+    info = fixed.meta["refined_extrinsics"]
+    assert info["row_error_before_px"] > 3 and info["row_error_after_px"] < 0.3
 
 
 def test_save_load_roundtrip(tmp_path):

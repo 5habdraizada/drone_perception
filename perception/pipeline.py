@@ -19,6 +19,7 @@ from perception.terrain import StereoRig, Terrain, TerrainConfig, TerrainEstimat
 class FrameResult:
     t: float
     left: np.ndarray                 # rectified left image (grayscale)
+    right: np.ndarray                # rectified right image (grayscale)
     terrain: Terrain
     scene: SceneFrame | None         # None without a backbone
     mapped: bool                     # added to the map (needs a pose and a ground plane)
@@ -75,7 +76,7 @@ class Pipeline:
             mapped = self.map.update(frame, self.camera_pose(t_world_left), pose_cov)
         t4 = time.perf_counter()
         ms = {"rectify": t1 - t0, "terrain": t2 - t1, "scene": t3 - t2, "map": t4 - t3}
-        return FrameResult(t, left, terrain, scene, mapped, {k: 1000 * v for k, v in ms.items()})
+        return FrameResult(t, left, right, terrain, scene, mapped, {k: 1000 * v for k, v in ms.items()})
 
 
 def _gray(img: np.ndarray) -> np.ndarray:

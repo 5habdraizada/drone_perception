@@ -103,6 +103,8 @@ perception/            the onboard library
 tools/                 command-line tools for real data
   calibrate_stereo.py  capture checkerboard pairs, calibrate the rig
   run_data.py          run the pipeline on your own recordings
+  viewer.py, .html     browser dashboard showing every output live
+  prepare_kagaru.py    convert the QUT Kagaru airborne stereo dataset
   make_sample_data.py  write a synthetic recording in run_data's format
   export_backbone.py   export pretrained models to ONNX (development machine)
   bench_backbone.py    compare models: speed, separability, feature visualisation
@@ -160,6 +162,13 @@ python -m demos.terrain      # terrain on one stereo pair vs ground truth
 python -m demos.scene        # regions and novelty along a flight
 python -m demos.map          # full chain into the world map, checked against truth
 python -m demos.mission      # a complete autonomous mission (seconds; uses oracle perception)
+```
+
+To watch everything the pipeline produces, frame by frame:
+
+```bash
+python -m tools.make_sample_data --out out/sample_data --frames 24
+python -m tools.viewer out/sample_data --model models/resnet18.onnx    # then open http://127.0.0.1:8000
 ```
 
 ---
@@ -230,6 +239,8 @@ python -m tools.run_data DATA --calib config/stereo.json --model models/resnet18
 | `--save-every N` | Save a picture every N processed frames (default 10) |
 | `--width N` | Rectified width with `--calib` (default 640; height follows the cameras' overlap) |
 | `--height-range LO HI` | Colour range for height images, in metres |
+| `--min-depth`, `--max-depth` | Expected depth range in metres (defaults 1.5 and 40). Raise both for high flight, e.g. 30 and 200 at 50–100 m |
+| `--map-resolution` | Map cell size in metres (default 0.25; use about 1 m when flying high) |
 
 ### 6.4 Output
 
@@ -250,6 +261,29 @@ python -m tools.run_data DATA --calib config/stereo.json --model models/resnet18
 - **Regions:** colours should follow real surfaces and stay the same from frame to frame.
 - **Novelty:** the first 5 frames are warm-up (no values). After that, z > 3 is unusual. Expect hits on genuinely odd things, and early on also on surfaces seen at new angles.
 - **Timing columns:** run on the RB3 for the numbers that matter.
+
+### 6.6 The viewer
+
+```bash
+python -m tools.viewer DATA --calib config/stereo.json --model models/resnet18.onnx
+```
+
+It takes the same data and options as `run_data`, then serves a dashboard at http://127.0.0.1:8000:
+
+- **Image tiles:** both rectified cameras, disparity, height, slope, roughness, regions, novelty and contrast, each with its colour scale. Click a tile to enlarge it.
+- **The current frame's numbers:** altitude, tilt, depth coverage, ground-plane fit, feature noise, and timing for each stage.
+- **Regions table:** colour, size, height and share of each region.
+- **Confirmed anomalies.**
+- **Charts over time:** altitude, coverage, novelty (with the z = 3 line) and frame time.
+- **The world map** when poses are given: height, regions, anomaly hits or coverage, with the flown path and anomalies marked.
+
+**Controls:** Play/Pause (space), step (→), back through processed frames (←), the scrub bar, and Reset.
+
+**Options:**
+- `--play-fps` limits playback speed.
+- `--keep` sets how many frames stay available for stepping back (default 300).
+- `--host 0.0.0.0` lets you open it from another machine, e.g. the drone computer viewed from a laptop. It has no authentication, so only do that on a network you trust.
+- No extra packages are needed; it uses Python's built-in web server.
 
 ---
 
@@ -310,9 +344,22 @@ output at **640 × 352**, focal length ≈ 577 px.
 Each raw image is first shrunk with area averaging to roughly that sampling, so
 both rectified images are equally sharp and the downscale doesn't alias.
 
-If camera 2 turns out to be mounted on the left of camera 1, the outputs are
-swapped automatically and the report says so. Cameras stacked vertically are
-rejected (rotate the images 90° first).
+**Any mounting works.** The rectified x axis is built along the baseline, so the
+cameras can be side by side, one behind the other, or rotated relative to each
+other. If camera 2 sits on the left of camera 1, the outputs are swapped
+automatically.
+
+### 7.4 Correcting calibration drift from footage
+
+Vibration and knocks shift the cameras' relative rotation over time.
+`refine_extrinsics(calib, pairs)` re-estimates it from feature matches in ordinary
+footage, keeping the intrinsics and the baseline length. On the Kagaru flight it
+brought row alignment to 0.7 px at full resolution.
+
+**It cannot recover vergence** (a small inward rotation of one camera). On a flat,
+distant scene, vergence is almost indistinguishable from a change in depth, so it
+biases every disparity by a constant. A checkerboard calibration fixes vergence;
+self-calibration from flat ground does not. See [section 13](#13-validation-status).
 
 ---
 
@@ -563,8 +610,26 @@ The expectation is the same order on the RB3's Cortex-A78 cores, which fits the
 - The whole chain end to end.
 - Planner behaviour in closed loop.
 
+**First real-data test:** the [QUT Kagaru airborne stereo dataset](https://michaelwarren.info/docs/datasets/kagaru-airborne-stereo/),
+run with `python -m tools.prepare_kagaru` and then `tools.viewer` or `run_data`.
+It is a fixed-wing aircraft at about 85 m with downward stereo (0.78 m baseline), 100 frames.
+
+- **Works:** rectification of cameras that are rotated relative to each other, demosaicing,
+  dense disparity (85% coverage), regions and novelty, at about 120 ms per frame.
+- **Found and fixed:** a bug where a stale ground-plane prior blocked the plane fit.
+  There is now a regression test.
+- **Found: stereo depth on that airframe is unreliable.**
+  - The independent measurement (ground homography between frames, scaled by the INS distance flown)
+    gives a steady ~85 m altitude.
+  - Stereo reads ~40 m, oscillating at 5.2 Hz.
+  - Raw SIFT disparities show the same thing, so it is not a block-matching artifact.
+  - Cause: the mount flexes about ±0.2° with vibration, on top of a vergence bias that
+    self-calibration from flat terrain can't remove.
+- **Lesson for this rig:** mount the cameras rigidly, calibrate vergence with a checkerboard,
+  and consider correcting the disparity offset online from the drone's own motion.
+
 **Not yet verified:**
-1. Real images: lighting, shadows, motion blur, textureless surfaces.
+1. Real images from this project's own cameras.
 2. **Camera synchronisation.** The two different sensors are probably not hardware-synchronised. Exposures 10 ms apart on a moving drone corrupt stereo depth. This is the biggest risk.
 3. A real calibration.
 4. Timings on the RB3.

@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Perception Viewer</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --panel2: #1e232b; --line: #2a313b;
+    --text: #e6e9ee; --muted: #8b95a3; --accent: #4ea1ff; --warn: #ffb547; --bad: #ff6b6b; --good: #5dd39e;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-size: 13px; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 10px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .muted { color: var(--muted); }
+  .controls { display: flex; gap: 6px; align-items: center; }
+  button, select { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                   padding: 5px 10px; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #06121f; border-color: var(--accent); font-weight: 600; min-width: 72px; }
+  input[type=range] { width: 260px; accent-color: var(--accent); }
+  #status { margin-left: auto; font-variant-numeric: tabular-nums; }
+  #error { display: none; background: #3a1d1d; color: #ffd0d0; padding: 8px 16px; border-bottom: 1px solid #5a2a2a; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 14px; padding: 14px 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .tile, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .tile .cap { display: flex; justify-content: space-between; gap: 8px; padding: 6px 9px; font-size: 12px; }
+  .tile .cap b { font-weight: 600; }
+  .tile .cap span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tile img { display: block; width: 100%; background: #000; cursor: zoom-in; aspect-ratio: 640 / 352; object-fit: contain; }
+  .card { padding: 10px 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .kv { display: grid; grid-template-columns: 1fr auto; row-gap: 4px; font-variant-numeric: tabular-nums; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .bar { display: grid; grid-template-columns: 70px 1fr 60px; align-items: center; gap: 8px; margin: 3px 0; }
+  .bar .track { height: 8px; background: var(--panel2); border-radius: 4px; overflow: hidden; }
+  .bar .fill { height: 100%; background: var(--accent); }
+  .bar .num { text-align: right; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td, th { padding: 3px 4px; text-align: right; }
+  th { color: var(--muted); font-weight: 500; }
+  td:first-child, th:first-child { text-align: left; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+  .charts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+  .charts canvas { width: 100%; height: 110px; display: block; }
+  .chart .cap { padding: 6px 9px 0; font-size: 12px; display: flex; justify-content: space-between; }
+  #mapcard img { width: 100%; image-rendering: pixelated; background: #000; display: block; border-radius: 4px; }
+  #mapcard .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .empty { color: var(--muted); font-style: italic; }
+  #modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 10; align-items: center;
+           justify-content: center; flex-direction: column; gap: 8px; cursor: zoom-out; }
+  #modal img { max-width: 94vw; max-height: 86vh; image-rendering: pixelated; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } .charts { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 700px) { .tiles { grid-template-columns: 1fr 1fr; } input[type=range] { width: 140px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Perception viewer</h1>
+  <span class="muted" id="data"></span>
+  <div class="controls">
+    <button id="reset" title="Restart from the first frame">⟲ Reset</button>
+    <button id="back" title="Previous frame (←)">◀</button>
+    <button id="play" class="primary" title="Play / pause (space)">Play</button>
+    <button id="fwd" title="Next frame (→)">▶</button>
+    <input id="scrub" type="range" min="0" max="0" value="0" title="Processed frames">
+  </div>
+  <span id="status" class="muted"></span>
+</header>
+<div id="error"></div>
+<main>
+  <section>
+    <div class="tiles" id="tiles"></div>
+    <div class="charts">
+      <div class="tile chart"><div class="cap"><b>Altitude</b><span class="muted" id="c-alt"></span></div><canvas id="ch-alt"></canvas></div>
+      <div class="tile chart"><div class="cap"><b>Depth coverage</b><span class="muted" id="c-cov"></span></div><canvas id="ch-cov"></canvas></div>
+      <div class="tile chart"><div class="cap"><b>Max novelty</b><span class="muted" id="c-nov"></span></div><canvas id="ch-nov"></canvas></div>
+      <div class="tile chart"><div class="cap"><b>Frame time</b><span class="muted" id="c-ms"></span></div><canvas id="ch-ms"></canvas></div>
+    </div>
+  </section>
+  <aside>
+    <div class="card"><h2>Frame</h2><div class="kv" id="stats"></div></div>
+    <div class="card"><h2>Timings</h2><div id="timings"></div></div>
+    <div class="card"><h2>Regions</h2><div id="regions"></div></div>
+    <div class="card" id="mapcard"><div class="row"><h2 style="margin:0">Map</h2>
+      <select id="maplayer"><option value="height">height</option><option value="regions">regions</option>
+        <option value="anomalies">anomaly hits</option><option value="coverage">times seen</option></select></div>
+      <div id="mapbody"></div></div>
+    <div class="card"><h2>Confirmed anomalies</h2><div id="anomalies"></div></div>
+  </aside>
+</main>
+<div id="modal"><img id="modal-img" alt=""><div id="modal-cap" class="muted"></div></div>
+
+<script>
+const LAYERS = [["left", "Left camera"], ["right", "Right camera"], ["disparity", "Disparity"],
+                ["height", "Height"], ["slope", "Slope"], ["roughness", "Roughness"],
+                ["regions", "Regions"], ["novelty", "Novelty"], ["contrast", "Contrast"]];
+const $ = id => document.getElementById(id);
+let state = null, shownFrame = null, shownMap = null;
+
+$("tiles").innerHTML = LAYERS.map(([k, name]) =>
+  `<div class="tile"><div class="cap"><b>${name}</b><span id="lg-${k}"></span></div><img id="img-${k}" alt="${name}"></div>`).join("");
+for (const [k, name] of LAYERS) {
+  $(`img-${k}`).onclick = () => openModal($(`img-${k}`).src, `${name} — ${$("lg-" + k).textContent}`);
+}
+$("modal").onclick = () => $("modal").style.display = "none";
+function openModal(src, cap) { $("modal-img").src = src; $("modal-cap").textContent = cap; $("modal").style.display = "flex"; }
+
+async function control(action, value) {
+  const q = new URLSearchParams({action}); if (value !== undefined) q.set("value", value);
+  state = await (await fetch(`/api/control?${q}`, {method: "POST"})).json(); render();
+}
+$("play").onclick = () => control(state && state.playing ? "pause" : "play");
+$("back").onclick = () => control("back");
+$("fwd").onclick = () => control("forward");
+$("reset").onclick = () => { shownFrame = null; shownMap = null; control("reset"); };
+$("scrub").oninput = e => { if (state) control("seek", state.cached[+e.target.value]); };
+$("maplayer").onchange = () => { shownMap = null; render(); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); $("play").click(); }
+  if (e.code === "ArrowLeft") control("back");
+  if (e.code === "ArrowRight") control("forward");
+  if (e.code === "Escape") $("modal").style.display = "none";
+});
+
+const fmt = (v, d = 1, unit = "") => v === null || v === undefined || v === "" ? "—" : `${(+v).toFixed(d)}${unit}`;
+const pct = v => v === null || v === undefined || v === "" ? "—" : `${Math.round(v * 100)}%`;
+
+function render() {
+  if (!state) return;
+  $("data").textContent = state.data;
+  $("play").textContent = state.playing ? "Pause" : (state.done ? "Done" : "Play");
+  $("status").textContent = state.frame === null ? "loading…" :
+    `frame ${state.frame} · ${state.processed} processed${state.done ? " · end of data" : ""}`;
+  $("error").style.display = state.error ? "block" : "none";
+  $("error").textContent = state.error || "";
+  const sc = $("scrub"); sc.max = Math.max(0, state.cached.length - 1);
+  if (state.frame !== null) sc.value = state.cached.indexOf(state.frame);
+
+  if (state.frame !== null && state.frame !== shownFrame) {
+    shownFrame = state.frame;
+    for (const [k] of LAYERS) $(`img-${k}`).src = `/api/frame/${state.frame}/${k}.jpg`;
+  }
+  for (const [k] of LAYERS) $(`lg-${k}`).textContent = (state.legend || {})[k] || "";
+
+  const r = state.record || {}, x = state.extra || {};
+  const rows = [["Altitude", fmt(r.altitude_m, 2, " m")], ["Tilt", fmt(r.tilt_deg, 1, "°")],
+    ["Depth coverage", pct(r.depth_coverage)], ["On ground plane", pct(r.ground_inliers)],
+    ["Regions", r.regions === "" ? "—" : r.regions ?? "—"], ["Max novelty", fmt(r.novelty_max, 1)],
+    ["Feature noise", fmt(x.noise, 3)], ["Mapped", r.mapped ? "yes" : "no"], ["Time", fmt(r.t, 2, " s")]];
+  $("stats").innerHTML = rows.map(([a, b]) => `<div>${a}</div><div>${b}</div>`).join("");
+
+  const t = x.timings || {}, total = Object.values(t).reduce((a, b) => a + b, 0) || 1;
+  $("timings").innerHTML = Object.entries(t).map(([k, v]) =>
+    `<div class="bar"><span>${k}</span><div class="track"><div class="fill" style="width:${100 * v / total}%"></div></div><span class="num">${v.toFixed(1)} ms</span></div>`).join("")
+    + `<div class="bar"><b>total</b><span></span><b class="num">${total.toFixed(1)} ms</b></div>`;
+
+  $("regions").innerHTML = x.regions && x.regions.length
+    ? `<table><tr><th>id</th><th>cells</th><th>height</th><th>share</th></tr>` + x.regions.map(g =>
+        `<tr><td><span class="sw" style="background:${g.colour}"></span>${g.id}</td><td>${g.cells}</td><td>${fmt(g.height, 2, " m")}</td><td>${pct(g.weight)}</td></tr>`).join("") + `</table>`
+    : `<div class="empty">needs --model</div>`;
+
+  if (state.has_map) {
+    const key = `${state.map_frames}-${$("maplayer").value}`;
+    if (key !== shownMap) {
+      shownMap = key;
+      $("mapbody").innerHTML = `<img id="mapimg" alt="map" src="/api/map/${$("maplayer").value}.png?n=${state.map_frames}">`;
+      $("mapimg").onclick = () => openModal($("mapimg").src, `Map — ${$("maplayer").value} (north up; white = path, red = anomalies)`);
+    }
+  } else {
+    $("mapbody").innerHTML = `<div class="empty">needs poses.csv</div>`; shownMap = null;
+  }
+  $("anomalies").innerHTML = state.anomalies.length
+    ? `<table><tr><th>where (m)</th><th>peak z</th><th>hits</th><th>height</th></tr>` + state.anomalies.map(a =>
+        `<tr><td>${fmt(a.x, 1)}, ${fmt(a.y, 1)}</td><td>${fmt(a.peak_novelty, 1)}</td><td>${a.hits}</td><td>${fmt(a.height, 2, " m")}</td></tr>`).join("") + `</table>`
+    : `<div class="empty">none yet</div>`;
+
+  const s = state.series;
+  chart("ch-alt", s, "altitude_m", "c-alt", v => fmt(v, 1, " m"), null, null, 1.0);
+  chart("ch-cov", s, "depth_coverage", "c-cov", pct, [0, 1]);
+  chart("ch-nov", s, "novelty_max", "c-nov", v => fmt(v, 1), null, 3, 2.0);
+  chart("ch-ms", s, "total_ms", "c-ms", v => fmt(v, 0, " ms"), null, null, 20);
+}
+
+// minSpan: smallest vertical range shown, so centimetre noise doesn't look like a crash.
+function chart(id, series, key, capId, label, range = null, threshold = null, minSpan = 0) {
+  const c = $(id), dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  const pts = series.map(p => [p.frame, p[key]]).filter(([, v]) => v !== null && v !== "" && v !== undefined);
+  const cur = series.find(p => p.frame === (state && state.frame));
+  $(capId).textContent = cur ? label(cur[key]) : "";
+  if (pts.length < 2) return;
+  const xs = pts.map(p => p[0]), ys = pts.map(p => +p[1]);
+  let [lo, hi] = range || [Math.min(...ys), Math.max(...ys)];
+  if (threshold !== null) hi = Math.max(hi, threshold * 1.2);
+  if (hi - lo < Math.max(minSpan, 1e-9)) { const mid = (hi + lo) / 2, half = Math.max(minSpan, 2) / 2; lo = mid - half; hi = mid + half; }
+  const pad = 6, X = v => pad + (v - xs[0]) / Math.max(xs[xs.length - 1] - xs[0], 1) * (w - 2 * pad),
+        Y = v => h - pad - (v - lo) / (hi - lo) * (h - 2 * pad);
+  g.strokeStyle = "#2a313b"; g.lineWidth = 1;
+  for (const f of [0, .5, 1]) { g.beginPath(); g.moveTo(pad, Y(lo + f * (hi - lo))); g.lineTo(w - pad, Y(lo + f * (hi - lo))); g.stroke(); }
+  if (threshold !== null) { g.strokeStyle = "#ffb547"; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(pad, Y(threshold)); g.lineTo(w - pad, Y(threshold)); g.stroke(); g.setLineDash([]); }
+  g.strokeStyle = "#4ea1ff"; g.lineWidth = 1.5; g.beginPath();
+  pts.forEach(([f, v], i) => i ? g.lineTo(X(f), Y(+v)) : g.moveTo(X(f), Y(+v))); g.stroke();
+  if (state && state.frame !== null) { g.strokeStyle = "#e6e9ee"; g.lineWidth = 1; g.beginPath(); g.moveTo(X(state.frame), pad); g.lineTo(X(state.frame), h - pad); g.stroke(); }
+  g.fillStyle = "#8b95a3"; g.font = "10px system-ui"; g.fillText(label(hi), pad + 2, pad + 9); g.fillText(label(lo), pad + 2, h - pad - 2);
+}
+
+async function poll() {
+  try { state = await (await fetch("/api/state")).json(); render(); } catch (e) { $("status").textContent = "viewer not reachable"; }
+  setTimeout(poll, state && state.playing ? 200 : 600);
+}
+poll();
+</script>
+</body>
+</html>
