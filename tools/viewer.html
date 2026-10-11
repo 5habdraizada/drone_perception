@@ -134,8 +134,12 @@ function render() {
   if (!state) return;
   $("data").textContent = state.data;
   $("play").textContent = state.playing ? "Pause" : (state.done ? "Done" : "Play");
-  $("status").textContent = state.frame === null ? "loading…" :
+  $("status").textContent = state.frame === null ? "processing the first frame…" :
     `frame ${state.frame} · ${state.processed} processed${state.done ? " · end of data" : ""}`;
+  if (state.frame === null && shownFrame !== null) {  // after a reset: don't leave the old images up
+    shownFrame = null;
+    for (const [k] of LAYERS) $(`img-${k}`).removeAttribute("src");
+  }
   $("error").style.display = state.error ? "block" : "none";
   $("error").textContent = state.error || "";
   const sc = $("scrub"); sc.max = Math.max(0, state.cached.length - 1);
@@ -162,7 +166,7 @@ function render() {
   $("regions").innerHTML = x.regions && x.regions.length
     ? `<table><tr><th>id</th><th>cells</th><th>height</th><th>share</th></tr>` + x.regions.map(g =>
         `<tr><td><span class="sw" style="background:${g.colour}"></span>${g.id}</td><td>${g.cells}</td><td>${fmt(g.height, 2, " m")}</td><td>${pct(g.weight)}</td></tr>`).join("") + `</table>`
-    : `<div class="empty">needs --model</div>`;
+    : `<div class="empty">${state.frame === null ? "—" : state.has_scene ? "none" : "needs --model"}</div>`;
 
   if (state.has_map) {
     const key = `${state.map_frames}-${$("maplayer").value}`;
@@ -172,7 +176,8 @@ function render() {
       $("mapimg").onclick = () => openModal($("mapimg").src, `Map — ${$("maplayer").value} (north up; white = path, red = anomalies)`);
     }
   } else {
-    $("mapbody").innerHTML = `<div class="empty">needs poses.csv</div>`; shownMap = null;
+    $("mapbody").innerHTML = `<div class="empty">${state.has_poses ? "builds as frames are processed" : "needs poses.csv"}</div>`;
+    shownMap = null;
   }
   $("anomalies").innerHTML = state.anomalies.length
     ? `<table><tr><th>where (m)</th><th>peak z</th><th>hits</th><th>height</th></tr>` + state.anomalies.map(a =>

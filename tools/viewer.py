@@ -75,6 +75,7 @@ class Session:
             self._advance()
         elif action == "reset":
             self.reset()
+            self._advance()  # show the first frame straight away, as at start-up
 
     def _last(self):
         return next(reversed(self.cache)) if self.cache else None
@@ -134,6 +135,7 @@ class Session:
                 "record": cur["record"] if cur else None, "extra": cur["extra"] if cur else None,
                 "legend": self.legend, "series": self.series,
                 "has_map": bool(grid is not None and grid.frames),
+                "has_poses": bool(self.poses), "has_scene": bool(self.args.model),
                 "anomalies": _jsonable(grid.anomalies()) if grid is not None and grid.frames else [],
                 "map_frames": grid.frames if grid is not None else 0,
             }
