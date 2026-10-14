@@ -54,12 +54,28 @@ class Scene:
                 self.texture[r0:r1, c0:c1] = 0.5 * alt[r0:r1, c0:c1] + (0.35 if b.h > 0 else 0.1)
         self.texture = np.clip(self.texture, 0.0, 1.0)
 
+    @classmethod
+    def from_arrays(cls, height: np.ndarray, texture: np.ndarray, res: float) -> "Scene":
+        """A scene from real rasters covering the same square, row 0 at the south edge
+        (y = -extent/2): height in metres (world z), texture in 0..1 at `res` m per pixel.
+        The height grid may be coarser than the texture (e.g. 0.5 m LiDAR under an 8 cm photo),
+        which keeps ray marching fast."""
+        if texture.shape[0] != texture.shape[1] or height.shape[0] != height.shape[1]:
+            raise ValueError("height and texture must be square")
+        scene = cls.__new__(cls)
+        scene.extent, scene.res, scene.blocks, scene.seed = texture.shape[0] * res, res, [], 0
+        scene.height = np.ascontiguousarray(height, np.float32)
+        scene.texture = np.ascontiguousarray(np.clip(texture, 0, 1), np.float32)
+        return scene
+
     def _idx(self, coord: float) -> int:
         return int(round((coord + self.extent / 2) / self.res))
 
     def sample(self, x: np.ndarray, y: np.ndarray, field_: np.ndarray, interp: int) -> np.ndarray:
-        mx = ((x + self.extent / 2) / self.res).astype(np.float32)
-        my = ((y + self.extent / 2) / self.res).astype(np.float32)
+        """Look up any of the scene's rasters (each covers the full extent, whatever its size)."""
+        res = self.extent / field_.shape[0]
+        mx = ((x + self.extent / 2) / res).astype(np.float32)
+        my = ((y + self.extent / 2) / res).astype(np.float32)
         return cv2.remap(field_, mx, my, interp, borderMode=cv2.BORDER_REPLICATE)
 
 
@@ -148,13 +164,15 @@ def render_view(
     return np.clip(img, 0, 255).astype(np.uint8), depth, hit_h
 
 
-def _march(scene, rays_c, r_wc, cam_c, steps=400, refine=12):
+def _march(scene, rays_c, r_wc, cam_c, step_m=0.25, refine=12):
     h, w = rays_c.shape[:2]
     rays_w = rays_c @ r_wc.T  # point at camera depth z is cam_c + z * rays_w
 
     hmax, hmin = float(scene.height.max()), float(scene.height.min())
     z_near = max(0.1, (cam_c[2] - hmax) * 0.7)
     z_far = (cam_c[2] - hmin) * 1.6
+    # Coarse steps find the first crossing; bisection then pins it down to step / 2**refine.
+    steps = int(np.clip((z_far - z_near) / step_m, 120, 400))
 
     def below(z):
         p = cam_c + z[..., None] * rays_w

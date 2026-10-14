@@ -75,11 +75,14 @@ def test_cell_height_tracks_structures(tilted):
     assert np.nanmin(terrain.cell_height) < -0.5
 
 
-def test_big_roof_without_prior_is_mistaken_for_ground(big_roof):
-    # Documents the failure mode the prior exists for.
+def test_big_roof_is_not_taken_for_the_ground(big_roof):
+    # The roof is the largest plane in view; the ground is the farthest well-supported one.
     left, right, _ = big_roof
     terrain = TerrainEstimator(RIG).process(left, right)
-    assert abs(terrain.altitude - (ALTITUDE - 1.2)) < 0.2
+    assert abs(terrain.altitude - ALTITUDE) < 0.1
+    # The old rule (largest plane) gets this wrong: kept as an option, documented here.
+    old = TerrainEstimator(RIG, TerrainConfig(ground_rule="largest")).process(left, right)
+    assert abs(old.altitude - (ALTITUDE - 1.2)) < 0.2
 
 
 def test_prior_keeps_true_ground_under_big_roof(big_roof):

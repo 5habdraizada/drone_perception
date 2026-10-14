@@ -5,11 +5,14 @@
 Default: rectified 640 × 352 pairs in left/ and right/, rig.json and poses.csv.
 --raw: unrectified, distorted 960 × 540 images from a mismatched long/wide lens
 pair like the real rig, plus the matching stereo.json for --calib.
+--area DIR: fly over a real place from tools/fetch_pdok.py instead of the synthetic scene,
+e.g. --area data/delft --altitude 45 --baseline 0.3 --x-range -120 120 --y 40
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import json
 from pathlib import Path
 
@@ -38,29 +41,40 @@ def main(argv=None) -> None:
     ap.add_argument("--frames", type=int, default=12)
     ap.add_argument("--altitude", type=float, default=6.0)
     ap.add_argument("--raw", action="store_true", help="unrectified, distorted images plus stereo.json")
+    ap.add_argument("--area", help="real area folder from tools/fetch_pdok.py (rectified images only)")
+    ap.add_argument("--baseline", type=float, help="stereo baseline, m (default: the rig's 0.10)")
+    ap.add_argument("--x-range", type=float, nargs=2, default=(-8.0, 8.0), help="flight line start/end x, m")
+    ap.add_argument("--y", type=float, default=0.0, help="flight line y, m")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
     for side in ("left", "right"):
         (out / side).mkdir(parents=True, exist_ok=True)
-    scene = flight_scene()
+    if args.area and args.raw:
+        raise SystemExit("--area renders rectified images only; drop --raw")
+    if args.area:
+        from sim.real_world import load_area
+        scene = load_area(args.area).scene
+    else:
+        scene = flight_scene()
+    rig = dataclasses.replace(RIG, baseline=args.baseline) if args.baseline else RIG
     calib = sample_calibration() if args.raw else None
     if calib is not None:
         calib.save(out / "stereo.json")
     else:
         (out / "rig.json").write_text(json.dumps(
-            {"fx": RIG.fx, "fy": RIG.fy, "cx": RIG.cx, "cy": RIG.cy, "baseline": RIG.baseline}, indent=2))
+            {"fx": rig.fx, "fy": rig.fy, "cx": rig.cx, "cy": rig.cy, "baseline": rig.baseline}, indent=2))
 
     rng = np.random.default_rng(0)
     with open(out / "poses.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["frame", "x", "y", "z", "qw", "qx", "qy", "qz"])
-        for i, x in enumerate(np.linspace(-8.0, 8.0, args.frames)):
+        for i, x in enumerate(np.linspace(args.x_range[0], args.x_range[1], args.frames)):
             roll, pitch = 1.5 * np.sin(i), 1.0 * np.cos(i)
-            r_wc, c = camera_pose(args.altitude, roll, pitch, (x, 0.0))
+            r_wc, c = camera_pose(args.altitude, roll, pitch, (x, args.y))
             if calib is None:
-                left, right, _ = render_stereo(scene, RIG, size=FRAME, altitude=args.altitude,
-                                               roll_deg=roll, pitch_deg=pitch, position=(x, 0.0), seed=i)
+                left, right, _ = render_stereo(scene, rig, size=FRAME, altitude=args.altitude,
+                                               roll_deg=roll, pitch_deg=pitch, position=(x, args.y), seed=i)
             else:
                 left, _, _ = render_view(scene, calib.left.K, calib.left.dist, RAW, r_wc, c, rng=rng)
                 right, _, _ = render_view(scene, calib.right.K, calib.right.dist, RAW, r_wc @ calib.R.T,

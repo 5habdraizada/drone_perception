@@ -153,6 +153,14 @@ def test_refine_extrinsics_fixes_a_drifted_calibration():
     info = fixed.meta["refined_extrinsics"]
     assert info["row_error_before_px"] > 3 and info["row_error_after_px"] < 0.3
 
+    # Without a trustworthy prior: full re-estimation still aligns rows usefully, though
+    # flat scenes leave the baseline direction loosely determined.
+    full = refine_extrinsics(StereoCalibration(truth.left, truth.right, np.eye(3), np.array([0.1, 0, 0])),
+                             pairs, mode="full", log=lambda *_: None)
+    assert full.meta["refined_extrinsics"]["row_error_after_px"] < 1.0
+    with pytest.raises(ValueError):
+        refine_extrinsics(drifted, pairs, mode="nope")
+
 
 def test_save_load_roundtrip(tmp_path):
     calib = _true_calib()

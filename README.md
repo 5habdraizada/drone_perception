@@ -105,18 +105,20 @@ tools/                 command-line tools for real data
   run_data.py          run the pipeline on your own recordings
   viewer.py, .html     browser dashboard showing every output live
   prepare_kagaru.py    convert the QUT Kagaru airborne stereo dataset
+  fetch_pdok.py        download a real Dutch area (orthophoto + LiDAR) for the simulator
   make_sample_data.py  write a synthetic recording in run_data's format
   export_backbone.py   export pretrained models to ONNX (development machine)
   bench_backbone.py    compare models: speed, separability, feature visualisation
   viz.py               drawing helpers
 demos/                 synthetic demos with ground truth
-  terrain.py  scene.py  map.py  mission.py
+  terrain.py  scene.py  map.py  mission.py  real_area.py
 sim/                   simulator used by tests and demos
   synthetic_stereo.py  ray-traced stereo images of a heightfield world
   synthetic_board.py   checkerboard images through real lens models
   oracle_perception.py exact perception frames, for fast mission tests
   mission.py           closed-loop mission simulation
   scenes.py            shared scenes and the simulated rig
+  real_world.py        real places: orthophoto draped over a LiDAR surface model
 tests/                 pytest suite, one file per module
 config/intrinsics.json the cameras' per-camera calibration as provided
 models/                exported backbones (.onnx + .json)
@@ -572,6 +574,17 @@ class PoseSource(Protocol):
 
 - **`sim/synthetic_stereo.py`** ray-traces a heightfield world (ground, boxes, pits, a striped object) into stereo images through any camera model, including your lens distortion. It also returns exact depth, height and the ground plane.
 - **`sim/synthetic_board.py`** renders checkerboard captures through real lens models, to test calibration end to end.
+- **`sim/real_world.py`** drapes a real orthophoto over a real LiDAR surface model, so the
+  simulator can fly over real buildings, streets and trees with exact ground truth.
+  The drone never sees the LiDAR: it is only the shape the photo is painted on and the answer key.
+  Get an area with `python -m tools.fetch_pdok --centre X Y --size 300` (Dutch RD coordinates;
+  PDOK open data: AHN4 elevation CC0, 8 cm orthophotos CC BY). Then:
+  - score a flight with `python -m demos.real_area --area data/delft --altitude 45`;
+  - record one for the viewer with `python -m tools.make_sample_data --area data/delft --altitude 45
+    --baseline 0.3 --x-range -120 120 --y 40 --frames 31 --out out/delft`.
+
+  Its limits: no real camera noise, blur, vibration or lighting; walls only appear as stretched
+  roof edges, because the orthophoto only sees from above; shadows are baked into the photo.
 - **`sim/oracle_perception.py`** produces the frames a perfect pipeline would output, so full missions run in seconds.
 - **`sim/mission.py`** runs the closed loop: perception → map → planner → drone kinematics with a battery model.
 

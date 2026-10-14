@@ -54,7 +54,11 @@ class TerrainConfig:
     edge_window: int = 9            # px; neighbourhood checked for depth steps
     edge_px: float = 0.75           # disparity range within it that marks a step (excluded from the fit)
     prior_weight: float = 0.003     # with a prior: pull towards it, per inlier (ridge strength)
-    prior_min_support: float = 0.05  # with a prior: a gated plane needs this inlier fraction, else ungated
+    ground_rule: str = "farthest"   # ground = farthest well-supported plane ("largest": most inliers)
+    max_planes: int = 3             # dominant planes found by sequential RANSAC
+    parallel_deg: float = 10.0      # later planes must be this close to parallel with the first
+    ground_min_support: float = 0.05  # a candidate needs this fraction of the sampled pixels ...
+    ground_min_ratio: float = 0.15  # ... and this fraction of the strongest plane's support
     prior_max_jump_m: float = 0.6   # with a prior: max altitude change between frames
     prior_max_angle_deg: float = 10.0  # with a prior: max ground-normal change between frames
 
@@ -164,18 +168,16 @@ class TerrainEstimator:
         if best is None:
             return None, 0.0
 
-        # Least-squares refit on the inliers. With a prior, pull gently towards it: when only a
-        # strip of ground is visible, its tilt is barely observable.
-        prior_cf = self._plane_to_coeffs(prior) if prior is not None else None
+        # Least-squares refit on the inliers, pulled gently towards the prior (or, without one,
+        # the RANSAC plane): when only a strip of ground is visible its tilt is barely observable.
+        anchor = self._plane_to_coeffs(prior) if prior is not None else best.copy()
         for _ in range(2):
             mask = np.abs(s_obs @ best - s_d) < cfg.inlier_px
             if mask.sum() < 3:
                 return None, 0.0
-            a_mat, b_vec = s_obs[mask], s_d[mask]
-            if prior_cf is not None:
-                lam = math.sqrt(cfg.prior_weight * mask.sum())
-                a_mat = np.vstack([a_mat, lam * np.eye(3)])
-                b_vec = np.concatenate([b_vec, lam * prior_cf])
+            lam = math.sqrt(cfg.prior_weight * mask.sum())
+            a_mat = np.vstack([s_obs[mask], lam * np.eye(3)])
+            b_vec = np.concatenate([s_d[mask], lam * anchor])
             best = np.linalg.lstsq(a_mat, b_vec, rcond=None)[0]
 
         inlier_frac = float(np.mean(np.abs(obs @ best - d) < cfg.inlier_px))
@@ -201,28 +203,75 @@ class TerrainEstimator:
         raise ValueError(f"unknown matcher {cfg.matcher!r}; use 'bm' or 'sgbm'")
 
     def _ransac(self, s_obs: np.ndarray, s_d: np.ndarray, prior: np.ndarray | None) -> np.ndarray | None:
-        cfg = self.cfg
-        idx = self._rng.integers(0, s_d.size, size=(cfg.ransac_iters, 3))  # 3-point hypotheses, batched
-        a_mat, b_vec = s_obs[idx], s_d[idx]
-        ok = np.abs(np.linalg.det(a_mat)) > 1e-9
-        coeffs = np.linalg.solve(a_mat[ok], b_vec[ok][..., None])[..., 0]
-        if prior is not None:
-            coeffs = np.vstack([coeffs, self._plane_to_coeffs(prior)])
+        """Pick the ground among the dominant planes in view.
 
-        normals = -coeffs / np.linalg.norm(coeffs, axis=1, keepdims=True)
-        coeffs = coeffs[-normals[:, 2] >= math.cos(math.radians(cfg.max_tilt_deg))]
-        if len(coeffs) == 0:
-            return None
-        support = (np.abs(s_obs @ coeffs.T - s_d[:, None]) < cfg.inlier_px).sum(axis=0)
+        Sequential RANSAC finds up to max_planes planes (best plane, remove its points, repeat).
+        Planes with real support are candidates; the ground is the farthest of them, since roofs,
+        vehicles and trees all sit above it. (The largest plane is wrong over a big flat roof.)
+        With a prior, a supported candidate near the previous ground wins.
+        """
+        cfg = self.cfg
+        cands = self._dominant_planes(s_obs, s_d)
         if prior is not None:
-            # Prefer planes near the previous ground, but only if one of them is actually
-            # supported by this frame's data; otherwise the scene moved on: search freely.
-            planes = np.array([self._coeffs_to_plane(cf) for cf in coeffs])
-            near = (np.abs(planes[:, 3] - prior[3]) <= cfg.prior_max_jump_m) & (
-                planes[:, :3] @ np.asarray(prior[:3]) >= math.cos(math.radians(cfg.prior_max_angle_deg)))
-            if near.any() and support[near].max() >= cfg.prior_min_support * s_d.size:
-                coeffs, support = coeffs[near], support[near]
-        return coeffs[np.argmax(support)]
+            cf = self._plane_to_coeffs(prior)
+            cands.append((cf, int((np.abs(s_obs @ cf - s_d) < cfg.inlier_px).sum())))
+        cands = [(cf, sup) for cf, sup in cands if self._tilt_ok(cf)]
+        if not cands:
+            return None
+        floor = max(cfg.ground_min_support * s_d.size, cfg.ground_min_ratio * max(s for _, s in cands))
+        good = [(cf, sup) for cf, sup in cands if sup >= floor]
+        if prior is not None:
+            near = [(cf, sup) for cf, sup in good if self._near(cf, prior)]
+            if near:
+                return max(near, key=lambda p: p[1])[0]
+        if cfg.ground_rule == "largest":
+            return max(good, key=lambda p: p[1])[0]
+        return min(good, key=lambda p: np.linalg.norm(p[0]))[0]  # smallest disparity = farthest
+
+    def _dominant_planes(self, s_obs: np.ndarray, s_d: np.ndarray) -> list[tuple[np.ndarray, int]]:
+        """Up to max_planes planes, each fitted to the points the previous ones didn't explain.
+        After the first, only planes roughly parallel to it are accepted (ground and flat roofs
+        are; a plane slicing across a roof edge isn't). Support counts each point once."""
+        cfg = self.cfg
+        left = np.ones(s_d.size, bool)
+        out, first_n = [], None
+        for _ in range(cfg.max_planes):
+            pool = np.flatnonzero(left)
+            if pool.size < 50:
+                break
+            idx = pool[self._rng.integers(0, pool.size, size=(cfg.ransac_iters, 3))]  # batched 3-point fits
+            a_mat, b_vec = s_obs[idx], s_d[idx]
+            ok = np.abs(np.linalg.det(a_mat)) > 1e-9
+            if not ok.any():
+                break
+            coeffs = np.linalg.solve(a_mat[ok], b_vec[ok][..., None])[..., 0]
+            keep = [self._tilt_ok(cf) and (first_n is None or self._parallel(cf, first_n)) for cf in coeffs]
+            coeffs = coeffs[keep]
+            if len(coeffs) == 0:
+                break
+            near = np.abs(s_obs[pool] @ coeffs.T - s_d[pool][:, None]) < cfg.inlier_px
+            best = coeffs[np.argmax(near.sum(axis=0))]
+            inl = left & (np.abs(s_obs @ best - s_d) < cfg.inlier_px)
+            if inl.sum() < 3:
+                break
+            out.append((best, int(inl.sum())))
+            left &= ~inl
+            if first_n is None:
+                first_n = -best / np.linalg.norm(best)
+        return out
+
+    def _parallel(self, coeffs: np.ndarray, normal: np.ndarray) -> bool:
+        n = -coeffs / np.linalg.norm(coeffs)
+        return bool(n @ normal >= math.cos(math.radians(self.cfg.parallel_deg)))
+
+    def _tilt_ok(self, coeffs: np.ndarray) -> bool:
+        n = -coeffs / np.linalg.norm(coeffs)
+        return bool(-n[2] >= math.cos(math.radians(self.cfg.max_tilt_deg)))
+
+    def _near(self, coeffs: np.ndarray, prior: np.ndarray) -> bool:
+        plane = self._coeffs_to_plane(coeffs)
+        return bool(abs(plane[3] - prior[3]) <= self.cfg.prior_max_jump_m and
+                    plane[:3] @ np.asarray(prior[:3]) >= math.cos(math.radians(self.cfg.prior_max_angle_deg)))
 
     def _coeffs_to_plane(self, coeffs: np.ndarray) -> np.ndarray:
         # d_px = -(f*B / D) * (n . ray)  =>  coeffs = -(f*B / D) * n

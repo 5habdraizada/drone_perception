@@ -246,14 +246,19 @@ def rectifying_rotations(r: np.ndarray, t: np.ndarray) -> tuple[np.ndarray, np.n
     return rect, rect @ np.asarray(r).T, swapped
 
 
-def refine_extrinsics(calib: StereoCalibration, pairs, max_features: int = 4000,
+def refine_extrinsics(calib: StereoCalibration, pairs, mode: str = "rotation", max_features: int = 4000,
                       log=print) -> StereoCalibration:
-    """Re-estimate the cameras' relative rotation and baseline direction from feature matches in
-    ordinary footage, keeping the intrinsics and the baseline length.
+    """Re-estimate the cameras' relative pose from feature matches in ordinary footage
+    (pairs of raw (left, right) frames of a textured scene), keeping intrinsics and baseline length.
 
-    For calibrations that drift (vibration, knocks): pairs are raw (left, right) frames of a
-    textured scene. Needs real parallax, i.e. depth not vastly larger than the baseline.
+    mode "rotation" (default; for a calibrated rig that has drifted): keep the calibration's
+        baseline direction and re-fit only the rotation. Well-posed even over flat ground.
+    mode "full": estimate rotation and baseline direction from scratch (essential matrix, MAGSAC),
+        for rigs with no trustworthy calibration. Over nearly flat scenes several geometries fit
+        the matches about equally well, so the baseline direction can come out several degrees off.
     """
+    if mode not in ("rotation", "full"):
+        raise ValueError(f"unknown mode {mode!r}; use 'rotation' or 'full'")
     sift = cv2.SIFT_create(nfeatures=max_features)
     matcher = cv2.BFMatcher(cv2.NORM_L2)
     pts_l, pts_r = [], []
@@ -270,20 +275,63 @@ def refine_extrinsics(calib: StereoCalibration, pairs, max_features: int = 4000,
         raise ValueError(f"only {len(pts_l)} feature matches; need a textured scene")
     nl = cv2.undistortPoints(np.float64(pts_l).reshape(-1, 1, 2), calib.left.K, calib.left.dist)
     nr = cv2.undistortPoints(np.float64(pts_r).reshape(-1, 1, 2), calib.right.K, calib.right.dist)
-    thr = 1.0 / np.mean([calib.left.K[0, 0], calib.right.K[0, 0]])  # ~1 px in normalised units
-    e, mask = cv2.findEssentialMat(nl, nr, np.eye(3), method=cv2.RANSAC, prob=0.9999, threshold=thr)
-    _, r, t, mask = cv2.recoverPose(e, nl, nr, np.eye(3), mask=mask)
-    t = t.ravel() * calib.baseline
+    px = 1.0 / np.mean([calib.left.K[0, 0], calib.right.K[0, 0]])  # 1 px in normalised units
+    nl, nr = nl.reshape(-1, 2), nr.reshape(-1, 2)
+    if mode == "full":
+        e, mask = cv2.findEssentialMat(nl, nr, np.eye(3), method=cv2.USAC_MAGSAC, prob=0.9999, threshold=px)
+        _, r, t, mask = cv2.recoverPose(e, nl, nr, np.eye(3), mask=mask)
+        r, t, inl = r, t.ravel() * calib.baseline, mask.ravel() > 0
+    else:
+        r, inl = _refine_rotation(calib.R, calib.T / calib.baseline, nl, nr, px)
+        t = calib.T.copy()
     out = StereoCalibration(calib.left, calib.right, r, t, math.nan, dict(calib.meta))
 
-    inl = mask.ravel() > 0
     before = _row_error(calib, np.float64(pts_l)[inl], np.float64(pts_r)[inl])
     after = _row_error(out, np.float64(pts_l)[inl], np.float64(pts_r)[inl])
-    out.meta["refined_extrinsics"] = {"matches": len(pts_l), "inliers": int(inl.sum()),
+    out.meta["refined_extrinsics"] = {"mode": mode, "matches": len(pts_l), "inliers": int(inl.sum()),
                                       "row_error_before_px": before, "row_error_after_px": after}
-    log(f"refine_extrinsics: {inl.sum()}/{len(pts_l)} inlier matches; rectified row error "
+    log(f"refine_extrinsics ({mode}): {inl.sum()}/{len(pts_l)} inlier matches; rectified row error "
         f"{before:.2f} px -> {after:.2f} px (median, at {out.left.size[0]} px width)")
     return out
+
+
+def _sampson(r: np.ndarray, t_dir: np.ndarray, nl: np.ndarray, nr: np.ndarray) -> np.ndarray:
+    """Signed Sampson residual of each match under X_right = R X_left + t (normalised units)."""
+    tx = np.array([[0, -t_dir[2], t_dir[1]], [t_dir[2], 0, -t_dir[0]], [-t_dir[1], t_dir[0], 0]])
+    e = tx @ r
+    a = np.column_stack([nl, np.ones(len(nl))])
+    b = np.column_stack([nr, np.ones(len(nr))])
+    ea, eb = a @ e.T, b @ e
+    num = np.einsum("ij,ij->i", b, ea)
+    return num / np.sqrt(ea[:, 0] ** 2 + ea[:, 1] ** 2 + eb[:, 0] ** 2 + eb[:, 1] ** 2 + 1e-18)
+
+
+def _refine_rotation(r0: np.ndarray, t_dir: np.ndarray, nl: np.ndarray, nr: np.ndarray, px: float):
+    """Levenberg-Marquardt on the rotation only (3 parameters), with the baseline direction fixed.
+    Inliers are re-selected with a shrinking threshold: drift can start many pixels off."""
+    r = np.asarray(r0, np.float64)
+    inl = np.ones(len(nl), bool)
+    for thr in (50 * px, 10 * px, 3 * px, 1.5 * px):
+        inl = np.abs(_sampson(r, t_dir, nl, nr)) < thr
+        if inl.sum() < 20:
+            break
+        lam = 1e-3
+        for _ in range(20):
+            res = _sampson(r, t_dir, nl[inl], nr[inl])
+            jac = np.empty((len(res), 3))
+            for k in range(3):
+                d = np.zeros(3)
+                d[k] = 1e-6
+                jac[:, k] = (_sampson(cv2.Rodrigues(d)[0] @ r, t_dir, nl[inl], nr[inl]) - res) / 1e-6
+            step = np.linalg.solve(jac.T @ jac + lam * np.eye(3), -jac.T @ res)
+            cand = cv2.Rodrigues(step)[0] @ r
+            if np.sum(_sampson(cand, t_dir, nl[inl], nr[inl]) ** 2) < np.sum(res ** 2):
+                r, lam = cand, lam * 0.3
+                if np.linalg.norm(step) < 1e-9:
+                    break
+            else:
+                lam *= 10
+    return r, np.abs(_sampson(r, t_dir, nl, nr)) < 1.5 * px
 
 
 def _row_error(calib: StereoCalibration, pts_l: np.ndarray, pts_r: np.ndarray) -> float:

@@ -86,8 +86,10 @@ def main(argv=None) -> None:
 
     keys = sorted(grey)
     pick = [keys[i] for i in np.linspace(0, len(keys) - 1, min(args.refine_frames, len(keys))).astype(int)]
+    # No usable prior pose: estimate it from scratch, then polish the rotation with that direction fixed.
     guess = StereoCalibration(models[0], models[1], np.eye(3), np.array([BASELINE_M, 0.0, 0.0]))
-    calib = refine_extrinsics(guess, [grey[k] for k in pick])
+    calib = refine_extrinsics(guess, [grey[k] for k in pick], mode="full")
+    calib = refine_extrinsics(calib, [grey[k] for k in pick], mode="rotation")
     calib.meta["source"] = "QUT Kagaru Airborne Stereo, intrinsics as published, extrinsics refined from footage"
     calib.save(out / "stereo.json")
 
