@@ -8,6 +8,7 @@ Policies (sim/search_policies.py):
   lawnmower   systematic sweep at cruise altitude: the usual coverage baseline
   greedy      each step, the move with the highest expected information gain (BeliefMap.expected_gain)
               minus energy: what the reward asks for, without any learning
+  learned     the RL policy (sim/search_rl.py) from tools/train_search_policy.py, if --policy exists
 Draws the greedy run of the first episode: flown path (white high, cyan low), the object belief,
 and the true hidden objects (green).
 """
@@ -23,6 +24,7 @@ import numpy as np
 
 from sim.search_env import DroneSearchEnv, SearchConfig, random_episode
 from sim.search_policies import GreedyInfoPolicy, LawnmowerPolicy, RandomPolicy, run_episode
+from sim.search_rl import LearnedPolicy
 
 POLICIES = {"random": lambda: RandomPolicy(1), "lawnmower": LawnmowerPolicy, "greedy": GreedyInfoPolicy}
 
@@ -32,6 +34,7 @@ def main(argv=None) -> None:
     ap.add_argument("--episodes", type=int, default=8)
     ap.add_argument("--steps", type=int, default=150)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--policy", default="models/search_policy.npz", help="learned policy, if trained")
     ap.add_argument("--out", default="out/search_demo.png")
     args = ap.parse_args(argv)
 
@@ -43,7 +46,10 @@ def main(argv=None) -> None:
     print(f"{'policy':10s} {'reward':>8s} {'entropy':>8s} {'found':>7s} {'false':>6s} "
           f"{'crashes':>7s} {'flown':>7s} {'s/ep':>5s}")
     drawn = None
-    for name, make in POLICIES.items():
+    policies = dict(POLICIES)
+    if Path(args.policy).exists():
+        policies["learned"] = lambda: LearnedPolicy(args.policy)
+    for name, make in policies.items():
         rows = []
         t0 = time.perf_counter()
         for i, ep in enumerate(episodes):

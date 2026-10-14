@@ -16,14 +16,16 @@ model quantisation and no GPU required. The target computer is a Qualcomm
 RB3 Gen 2.
 
 **Status:** every module works and is tested against synthetic data with exact
-ground truth. It has **not yet run on real images**; see
-[Validation status](#13-validation-status).
+ground truth, and has run on real airborne footage (QUT Kagaru) and on a real place
+rendered from orthophoto + LiDAR (Delft). It has **not yet run on this project's own
+cameras**; see [Validation status](#13-validation-status).
 
 ---
 
 ## Contents
 
 1. [What it does](#1-what-it-does)
+   - [How it works, in pictures](#how-it-works-in-pictures)
 2. [Architecture](#2-architecture)
 3. [Repository layout](#3-repository-layout)
 4. [Setup](#4-setup)
@@ -62,6 +64,123 @@ ground truth. It has **not yet run on real images**; see
 **Hardware assumed:**
 - Two downward-facing cameras: camera 1 (left) has a long lens (fx ≈ 1719 px), camera 2 (right) a short lens (fx ≈ 1175 px). Both 1920 × 1080, about 10 cm apart.
 - An RB3 Gen 2 (QCS6490, 8-core Kryo 670 CPU).
+
+---
+
+## How it works, in pictures
+
+One cycle, from two camera images to the next waypoint. Every picture below comes from
+`python -m tools.make_docs_images` (synthetic scenes have exact ground truth; the Delft one is
+a real place).
+
+### Step 1: Rectify the two cameras into one virtual stereo camera
+
+![Raw and rectified stereo pair](docs/images/01_rectification.jpg)
+
+The two cameras don't match: one has a long lens, the other a wide one, each with its own
+distortion, and they are slightly rotated relative to each other (top). Using the stereo
+calibration, `Rectifier` warps both into one shared pinhole camera, 640 × 352 px, where a point
+on the ground appears **on the same pixel row** in both images (bottom, green rows). Stereo
+matching then only has to search along a row.
+
+### Step 2: Measure the terrain from stereo
+
+![Terrain from one stereo pair](docs/images/02_terrain.jpg)
+
+`TerrainEstimator` matches the rows into a **disparity** image (how far each point shifts
+between the cameras; nearer means bigger shift). The **ground plane** is fitted to it with RANSAC,
+which gives altitude and tilt directly. Then every pixel gets a **height above that ground**,
+and each 32 × 32 px cell gets a median height, a **slope** and a **roughness**. Bottom right:
+the error against ground truth is near zero except in a thin band along walls, where block
+matching smears the depth step.
+
+### Step 3: Learn what the scene normally looks like, and spot what doesn't fit
+
+![Regions and novelty along a flight](docs/images/03_scene.jpg)
+
+A ResNet-18 (ONNX, on the CPU) turns the image into a feature vector per cell; `SceneModel`
+adds each cell's height, slope and roughness. Without any labels it:
+
+- groups cells into **regions** of similar surface (second column; the colours are stable ids
+  that persist from frame to frame);
+- scores **novelty**: how unlike anything seen so far a cell is (right column). It stays quiet
+  over roofs and ground it has learned, and lights up when the striped object appears in the last row.
+
+### Step 4: Put everything into a map of the world
+
+![The world map](docs/images/04_map.png)
+
+With the drone's pose from the control team, `GridMap` places every cell on a world grid:
+height above ground, regions, anomaly hits (a spot is only **confirmed** after hits in two
+separate frames, so one-frame noise never counts) and how often each cell was seen. Here
+the striped object is the orange anomaly on the right.
+
+### Step 5: Track what *can't* be seen: the belief map
+
+![Belief about a hidden object under trees](docs/images/05_belief.png)
+
+The camera map says what is visible. `BeliefMap` keeps the **probability that something is
+hidden** in each cell:
+
+- A clear view of open ground that finds nothing rules that ground out (dark).
+- **Roofs** (raised and smooth) can't hide anything at ground level, so they're excluded (black).
+- **Canopy** (raised and rough) only shows the ground through its gaps. From 20 m (top right),
+  view quality under the trees stays low, so the trees stay uncertain (purple). One frame
+  happened to glimpse the object (orange, bottom left), which is not enough to be sure.
+- A **low pass** at 8 m sees more through the gaps and confirms it (bright, bottom right).
+
+The total uncertainty, in bits, is the **reward**. `expected_gain(x, y, altitude)` predicts how
+many bits a view from a given place and height would remove, accounting for canopy, range and
+line of sight.
+
+### Step 6: Decide where to fly
+
+![A mission](docs/images/06_mission.png)
+
+`MissionPlanner` issues one waypoint at a time. In order of priority: come home and land
+(battery, position uncertainty), investigate a confirmed anomaly from low down, re-check
+something seen only once, otherwise explore. Every altitude clears the tallest mapped thing on
+the way, plus a margin; unmapped ground is assumed tall, because the cameras only look down.
+Above: explore (grey), verify (yellow), investigate the striped object (red), return (blue), land.
+
+![A mission searching for a hidden object](docs/images/07_mission_search.png)
+
+With a belief map attached, exploring becomes **search** (magenta): the planner flies to
+wherever the expected information gain, minus the cost of getting there, is highest. Here
+it found the object hidden under the trees (top right) and noticed the pit (a depression is an
+indirect sign of a void underground).
+
+### Step 7: Learn a better search policy from the reward
+
+![Search policies on the same scene](docs/images/08_search_policies.png)
+
+The same reward trains a policy with reinforcement learning (`sim/search_env.py`,
+`sim/search_rl.py`). For each of the 16 moves (8 directions × 20 m or 8 m), the policy sees the
+expected gain right there, plus how much uncertainty lies further along that direction, split
+into ground under trees and open ground. That lets it plan beyond the next move.
+
+Above, on a scene none of them trained on: the lawnmower sweeps evenly and the greedy planner
+takes the single best next move; neither finds the object under the trees. The learned policy
+crosses the tree patch twice and finds it. That's one example; over 30 held-out scenes it finds
+17 of 42 hidden objects, against 12 for greedy (see [section 11](#11-simulation-and-tests)).
+None of them flies low over the trees; section 11 explains why, and what to change.
+
+![Training curve](docs/images/09_training.png)
+
+Training starts by imitating the greedy planner (iteration 0), then improves with PPO for
+60 iterations of 28 episodes. The version that scores best on 14 fixed evaluation scenes is
+kept. The gain in reward is small: the curve hovers around greedy's level (dashed).
+
+### Real place: Delft
+
+![Delft: rendered frame, LiDAR truth, and the stereo map](docs/images/10_delft.jpg)
+
+To test on real buildings and trees, `sim/real_world.py` drapes a real 8 cm orthophoto over the
+real LiDAR surface and renders stereo pairs along a flight line 45 m up (top). The mapped heights
+(bottom, 0.5 m baseline) recover the buildings that the LiDAR truth (middle) shows; the right-hand
+building is only partly recovered, because its roof texture is weak. At this height a 10 cm
+baseline is too short: see [section 11](#11-simulation-and-tests).
+*Orthophoto: Beeldmateriaal Nederland / PDOK (CC BY 4.0); elevation: AHN4 (CC0).*
 
 ---
 
@@ -123,6 +242,8 @@ tools/                 command-line tools for real data
   export_backbone.py   export pretrained models to ONNX (development machine)
   bench_backbone.py    compare models: speed, separability, feature visualisation
   viz.py               drawing helpers
+  train_search_policy.py  train the RL search policy (imitation, then PPO; needs PyTorch)
+  make_docs_images.py  regenerate the README's pictures in docs/images
 demos/                 synthetic demos with ground truth
   terrain.py  scene.py  map.py  mission.py  real_area.py  search_benchmark.py
 sim/                   simulator used by tests and demos
@@ -132,11 +253,13 @@ sim/                   simulator used by tests and demos
   mission.py           closed-loop mission simulation
   search_env.py        RL environment: search for hidden targets, reward = information
   search_policies.py   random, lawnmower and information-greedy policies
+  search_rl.py         learned search policy (NumPy inference) and its per-move features
   scenes.py            shared scenes and the simulated rig
   real_world.py        real places: orthophoto draped over a LiDAR surface model
 tests/                 pytest suite, one file per module
 config/intrinsics.json the cameras' per-camera calibration as provided
-models/                exported backbones (.onnx + .json)
+models/                exported backbones (.onnx + .json), search_policy.npz (trained search policy)
+docs/images/           pictures used in this README
 ```
 
 ---
@@ -181,6 +304,7 @@ python -m demos.map          # full chain into the world map, checked against tr
 python -m demos.mission      # a complete autonomous mission (seconds; uses oracle perception)
 python -m demos.mission --search     # the same, searching for an object hidden under trees
 python -m demos.search_benchmark     # is the reward meaningful? policies compared on random scenes
+python -m tools.train_search_policy  # retrain the RL search policy (~20 min on 16 cores)
 ```
 
 To watch everything the pipeline produces, frame by frame:
@@ -662,9 +786,30 @@ class PoseSource(Protocol):
 - Following the reward finds the most hidden objects, with no learning. The lawnmower removes
   about as much uncertainty but never flies low, so it finds none of the objects under trees.
 - Greedy still misses more than half. It's one step ahead only, and low passes over trees have
-  small footprints. That gap is what an RL policy trained on this reward has to close.
+  small footprints.
 
-There are 104 tests, one file per module, plus `test_pipeline.py` for the data
+**The learned policy** (`python -m tools.train_search_policy`, imitation of greedy then PPO;
+weights in `models/search_policy.npz`, NumPy-only inference). Tested on 30 scenes not used in
+training or for picking the checkpoint (`python -m demos.search_benchmark --episodes 30 --seed 20000`):
+
+| Policy | Mean reward | Uncertainty removed | Objects found | False finds | Crashes |
+|---|---|---|---|---|---|
+| random | 7 | 24% | 4/42 | 0 | 0 |
+| lawnmower | 234 | 83% | 3/42 | 0 | 0 |
+| greedy | 243 | 83% | 12/42 | 0 | 0 |
+| **learned (RL)** | **244** | 83% | **17/42** | 0 | 0 |
+
+- **It finds 40% more hidden objects than greedy** (17 vs 12), with no false finds or crashes.
+- **Its total reward is no better.** Most of the reward is uncertainty removed, and every cell counts
+  the same, so ruling out a big open area is worth more bits than a closer look under trees.
+- **No policy flies low.** A low move is safe on most steps, but its expected gain is about
+  0.5 bits against 7–8 for a high one: at 8 m the camera sees a small patch, and over trees
+  a smaller one. The extra objects come from re-crossing tree patches at 20 m, which catches more
+  chance glimpses through the canopy.
+- **Next fix:** weight the reward towards where objects can hide (cells under canopy), or
+  reward finds more, so that low passes over trees pay. The environment and trainer are ready for it.
+
+There are 107 tests, one file per module, plus `test_pipeline.py` for the data
 tools. Tests marked `slow` render images; skip them with `-m "not slow"`.
 
 **Limit of these tests:** the simulator shares the code's assumptions (pinhole
@@ -765,6 +910,8 @@ It is a fixed-wing aircraft at about 85 m with downward stereo (0.78 m baseline)
 - **No forward-looking sensor.** Obstacles ahead are only known once they've been mapped from above; unmapped space is assumed to be 3 m tall.
 - **Exploration uses frontiers,** about 2.2× an ideal back-and-forth sweep including the return. A dedicated sweep pattern would be more efficient for known rectangular areas.
 - **The mission simulator's kinematics are idealised** (no wind, no inertia).
+- **The learned search policy doesn't fly low over trees**, because the reward values clearing
+  open ground more (section 11). It finds more objects than greedy by re-crossing tree patches.
 - **The belief map is tested on oracle perception only.** Novelty hits under real canopy,
   and canopy/roof classification from real roughness, still need real data.
 - **Underground: indirect cues only.** Ground depressions raise the void belief, but nothing

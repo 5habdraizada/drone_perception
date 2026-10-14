@@ -1,0 +1,575 @@
+{
+ "imitation": [
+  2.4892948107285933,
+  2.43027663230896,
+  2.3156666466684053,
+  2.157783385479089,
+  2.0112484476783057,
+  1.8958246346675989,
+  1.7988157922571355,
+  1.7165686325593428,
+  1.6511912237514148,
+  1.6020216905709468,
+  1.5663345727053555,
+  1.5406512238762595,
+  1.5208995053262422,
+  1.5051156896533389,
+  1.4920213222503662,
+  1.4804387526078657,
+  1.470060930107579,
+  1.4614346966598972,
+  1.4536335323796128,
+  1.4466408960746997,
+  1.4410868088404338,
+  1.435925537889654,
+  1.4310975255388203,
+  1.4275664669094663,
+  1.4232942660649617,
+  1.4204017610260935,
+  1.4174220814849392,
+  1.4146225813663367,
+  1.412697510285811,
+  1.4103094989603215
+ ],
+ "ppo": [
+  {
+   "iteration": 1,
+   "reward": 244.7269261500359,
+   "found": 22,
+   "targets": 41,
+   "seconds": 12.967768499998783
+  },
+  {
+   "iteration": 2,
+   "reward": 249.6255840440078,
+   "found": 22,
+   "targets": 41,
+   "seconds": 13.948403400001553
+  },
+  {
+   "iteration": 3,
+   "reward": 246.05566379631892,
+   "found": 24,
+   "targets": 42,
+   "seconds": 13.985002199999144
+  },
+  {
+   "iteration": 4,
+   "reward": 246.86992906764598,
+   "found": 23,
+   "targets": 41,
+   "seconds": 13.08662700000059
+  },
+  {
+   "iteration": 5,
+   "reward": 248.2377966144773,
+   "found": 17,
+   "targets": 39,
+   "seconds": 14.088398100000632
+  },
+  {
+   "iteration": 6,
+   "reward": 249.37110539680788,
+   "found": 22,
+   "targets": 43,
+   "seconds": 14.793725399998948
+  },
+  {
+   "iteration": 7,
+   "reward": 247.32910664507966,
+   "found": 20,
+   "targets": 42,
+   "seconds": 14.142413699999452
+  },
+  {
+   "iteration": 8,
+   "reward": 245.93306953519757,
+   "found": 24,
+   "targets": 42,
+   "seconds": 13.157353300000977
+  },
+  {
+   "iteration": 9,
+   "reward": 253.43808581455053,
+   "found": 25,
+   "targets": 35,
+   "seconds": 13.29296980000072
+  },
+  {
+   "iteration": 10,
+   "reward": 251.59256589203642,
+   "found": 22,
+   "targets": 42,
+   "seconds": 12.598420599999372
+  },
+  {
+   "iteration": 11,
+   "reward": 252.61805219997908,
+   "found": 20,
+   "targets": 40,
+   "seconds": 13.10606750000079
+  },
+  {
+   "iteration": 12,
+   "reward": 250.74913191025368,
+   "found": 20,
+   "targets": 39,
+   "seconds": 12.195291199997882
+  },
+  {
+   "iteration": 13,
+   "reward": 251.89688304002493,
+   "found": 23,
+   "targets": 42,
+   "seconds": 12.879458300001716
+  },
+  {
+   "iteration": 14,
+   "reward": 248.15085188590527,
+   "found": 17,
+   "targets": 46,
+   "seconds": 12.739861800000654
+  },
+  {
+   "iteration": 15,
+   "reward": 249.8561362586668,
+   "found": 19,
+   "targets": 41,
+   "seconds": 12.388525299997127
+  },
+  {
+   "iteration": 16,
+   "reward": 247.1480472737982,
+   "found": 15,
+   "targets": 39,
+   "seconds": 12.342175300000235
+  },
+  {
+   "iteration": 17,
+   "reward": 252.40425846121937,
+   "found": 25,
+   "targets": 43,
+   "seconds": 11.827597499999683
+  },
+  {
+   "iteration": 18,
+   "reward": 249.48117324280742,
+   "found": 17,
+   "targets": 42,
+   "seconds": 12.487711199999467
+  },
+  {
+   "iteration": 19,
+   "reward": 248.36822602700127,
+   "found": 15,
+   "targets": 42,
+   "seconds": 12.357390799999848
+  },
+  {
+   "iteration": 20,
+   "reward": 252.0053510924351,
+   "found": 25,
+   "targets": 42,
+   "seconds": 12.432208099999116
+  },
+  {
+   "iteration": 21,
+   "reward": 251.37664738209347,
+   "found": 22,
+   "targets": 41,
+   "seconds": 15.223125700002129
+  },
+  {
+   "iteration": 22,
+   "reward": 254.10832873767623,
+   "found": 31,
+   "targets": 42,
+   "seconds": 13.10921640000015
+  },
+  {
+   "iteration": 23,
+   "reward": 248.34658886221,
+   "found": 21,
+   "targets": 45,
+   "seconds": 14.534259199997905
+  },
+  {
+   "iteration": 24,
+   "reward": 248.97125447734157,
+   "found": 17,
+   "targets": 42,
+   "seconds": 13.384408599999006
+  },
+  {
+   "iteration": 25,
+   "reward": 248.78729684670324,
+   "found": 23,
+   "targets": 43,
+   "seconds": 15.139369100001204
+  },
+  {
+   "iteration": 26,
+   "reward": 254.54854801475273,
+   "found": 29,
+   "targets": 48,
+   "seconds": 13.414196399997309
+  },
+  {
+   "iteration": 27,
+   "reward": 248.29877169587922,
+   "found": 22,
+   "targets": 40,
+   "seconds": 13.36525619999884
+  },
+  {
+   "iteration": 28,
+   "reward": 251.14910201031032,
+   "found": 22,
+   "targets": 39,
+   "seconds": 13.680440399999497
+  },
+  {
+   "iteration": 29,
+   "reward": 250.9134680349686,
+   "found": 21,
+   "targets": 45,
+   "seconds": 13.147944500000449
+  },
+  {
+   "iteration": 30,
+   "reward": 252.36018819540655,
+   "found": 24,
+   "targets": 41,
+   "seconds": 13.562387999998464
+  },
+  {
+   "iteration": 31,
+   "reward": 250.67130368245157,
+   "found": 23,
+   "targets": 42,
+   "seconds": 13.462610999999015
+  },
+  {
+   "iteration": 32,
+   "reward": 251.67232461029064,
+   "found": 25,
+   "targets": 38,
+   "seconds": 13.033990800002357
+  },
+  {
+   "iteration": 33,
+   "reward": 252.20465716537953,
+   "found": 23,
+   "targets": 44,
+   "seconds": 13.56406799999968
+  },
+  {
+   "iteration": 34,
+   "reward": 252.7976338902924,
+   "found": 25,
+   "targets": 42,
+   "seconds": 14.121137000001909
+  },
+  {
+   "iteration": 35,
+   "reward": 244.01099859908575,
+   "found": 17,
+   "targets": 42,
+   "seconds": 13.07880600000135
+  },
+  {
+   "iteration": 36,
+   "reward": 252.8389046266302,
+   "found": 25,
+   "targets": 39,
+   "seconds": 13.22233849999975
+  },
+  {
+   "iteration": 37,
+   "reward": 247.86305443462356,
+   "found": 17,
+   "targets": 43,
+   "seconds": 13.113245000000461
+  },
+  {
+   "iteration": 38,
+   "reward": 254.02573983998187,
+   "found": 29,
+   "targets": 44,
+   "seconds": 13.2851284999997
+  },
+  {
+   "iteration": 39,
+   "reward": 249.40133632984697,
+   "found": 15,
+   "targets": 45,
+   "seconds": 13.56644519999827
+  },
+  {
+   "iteration": 40,
+   "reward": 251.93098296800227,
+   "found": 23,
+   "targets": 40,
+   "seconds": 13.594123599999875
+  },
+  {
+   "iteration": 41,
+   "reward": 252.19747203681828,
+   "found": 19,
+   "targets": 45,
+   "seconds": 13.494493999998667
+  },
+  {
+   "iteration": 42,
+   "reward": 251.06215660082233,
+   "found": 27,
+   "targets": 44,
+   "seconds": 13.394471299998258
+  },
+  {
+   "iteration": 43,
+   "reward": 250.20312442078492,
+   "found": 24,
+   "targets": 39,
+   "seconds": 13.07106500000009
+  },
+  {
+   "iteration": 44,
+   "reward": 252.2042267000843,
+   "found": 26,
+   "targets": 41,
+   "seconds": 12.978865499997482
+  },
+  {
+   "iteration": 45,
+   "reward": 248.56810985250738,
+   "found": 23,
+   "targets": 45,
+   "seconds": 12.992308600001707
+  },
+  {
+   "iteration": 46,
+   "reward": 247.746358026005,
+   "found": 26,
+   "targets": 38,
+   "seconds": 12.793480700001965
+  },
+  {
+   "iteration": 47,
+   "reward": 249.55385947071952,
+   "found": 24,
+   "targets": 43,
+   "seconds": 13.188339399999677
+  },
+  {
+   "iteration": 48,
+   "reward": 245.09738217074212,
+   "found": 22,
+   "targets": 41,
+   "seconds": 12.719502200001443
+  },
+  {
+   "iteration": 49,
+   "reward": 253.4048752713047,
+   "found": 27,
+   "targets": 43,
+   "seconds": 12.881623000001127
+  },
+  {
+   "iteration": 50,
+   "reward": 249.03171034754558,
+   "found": 15,
+   "targets": 38,
+   "seconds": 12.886184599999979
+  },
+  {
+   "iteration": 51,
+   "reward": 249.0584345487733,
+   "found": 16,
+   "targets": 39,
+   "seconds": 13.542304399998102
+  },
+  {
+   "iteration": 52,
+   "reward": 253.43354248306375,
+   "found": 27,
+   "targets": 44,
+   "seconds": 13.234151399999973
+  },
+  {
+   "iteration": 53,
+   "reward": 248.8053527793538,
+   "found": 20,
+   "targets": 39,
+   "seconds": 13.500195100001292
+  },
+  {
+   "iteration": 54,
+   "reward": 249.3724713405962,
+   "found": 18,
+   "targets": 38,
+   "seconds": 12.956881399997656
+  },
+  {
+   "iteration": 55,
+   "reward": 255.5223232464241,
+   "found": 30,
+   "targets": 42,
+   "seconds": 13.139881300001434
+  },
+  {
+   "iteration": 56,
+   "reward": 256.8619154678689,
+   "found": 28,
+   "targets": 43,
+   "seconds": 12.68144029999894
+  },
+  {
+   "iteration": 57,
+   "reward": 251.92768975547693,
+   "found": 21,
+   "targets": 42,
+   "seconds": 14.001984700000321
+  },
+  {
+   "iteration": 58,
+   "reward": 251.87142448439664,
+   "found": 22,
+   "targets": 38,
+   "seconds": 13.298618999997416
+  },
+  {
+   "iteration": 59,
+   "reward": 255.8118486394275,
+   "found": 28,
+   "targets": 43,
+   "seconds": 13.334906500000216
+  },
+  {
+   "iteration": 60,
+   "reward": 251.24502232232308,
+   "found": 25,
+   "targets": 47,
+   "seconds": 13.085571699997672
+  }
+ ],
+ "eval": [
+  {
+   "iteration": 0,
+   "reward": 248.35879659110606,
+   "found": 12,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 5,
+   "reward": 243.2000968227954,
+   "found": 13,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 10,
+   "reward": 244.7493004898092,
+   "found": 13,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 15,
+   "reward": 244.67507866871892,
+   "found": 11,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 20,
+   "reward": 252.18751161576574,
+   "found": 14,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 25,
+   "reward": 254.11823727046277,
+   "found": 15,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 30,
+   "reward": 249.11088004637892,
+   "found": 12,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 35,
+   "reward": 250.3588313036086,
+   "found": 14,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 40,
+   "reward": 244.81003592295767,
+   "found": 12,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 45,
+   "reward": 248.55926538103546,
+   "found": 12,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 50,
+   "reward": 249.14351937892977,
+   "found": 12,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 55,
+   "reward": 246.70568006867484,
+   "found": 13,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  },
+  {
+   "iteration": 60,
+   "reward": 252.9847356827624,
+   "found": 14,
+   "targets": 18,
+   "false": 0,
+   "crashes": 0
+  }
+ ],
+ "greedy_eval": {
+  "reward": 250.98509434872267,
+  "found": 12,
+  "targets": 18
+ },
+ "best": {
+  "iteration": 25,
+  "reward": 254.11823727046277,
+  "found": 15,
+  "targets": 18,
+  "false": 0,
+  "crashes": 0
+ }
+}
