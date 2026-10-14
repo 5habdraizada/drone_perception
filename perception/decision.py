@@ -1,12 +1,14 @@
 """Mission planner: map + drone state -> one waypoint command per cycle.
 
 Priorities: return/land > investigate > verify > explore. Every altitude clears the tallest
-thing along the path; unmapped cells are assumed unknown_height tall.
+thing along the path; unmapped cells are assumed unknown_height tall. An optional advisor
+(perception/advisor.py) re-ranks and dismisses anomalies against a plain-language brief.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -30,6 +32,8 @@ class DecisionConfig:
     min_frontier_cells: int = 4      # ignore frontier scraps smaller than this
     anomaly_distance_ref: float = 15.0  # m; anomaly utility halves at this distance
     verify_candidates: bool = True
+    min_relevance: float = 0.3       # advisor: anomalies judged less relevant to the brief are dismissed
+    unassessed_relevance: float = 1.0  # advisor: priority weight until its answer arrives (don't wait)
 
     battery_per_m: float = 0.001     # battery fraction used per metre flown
     battery_reserve: float = 0.15    # fraction kept in hand on arrival home
@@ -61,11 +65,18 @@ class MissionPlanner:
     home: tuple[float, float]
     cfg: DecisionConfig = field(default_factory=DecisionConfig)
     report: list[dict] = field(default_factory=list)   # anomalies investigated, with when and what was seen
+    # Optional mission steering (perception/advisor.py): an AsyncAdvisor judging anomaly crops
+    # against a brief, and crops(anomaly) -> image | None. It only re-ranks and dismisses
+    # anomalies; safety (return, landing, clearance) never consults it.
+    advisor: object | None = None
+    crops: Callable[[dict], np.ndarray | None] | None = None
+    dismissed: list[dict] = field(default_factory=list)  # anomalies the advisor ruled out, with its reason
 
     def __post_init__(self):
         self._goal: _Goal | None = None
         self._verified: list[tuple[float, float]] = []
         self._landing = False
+        self._keys: list[tuple[float, float, str]] = []
 
     def decide(self, grid: GridMap, x: float, y: float, agl: float, battery: float,
                pose_sigma: float, t: float) -> Command:
@@ -124,6 +135,9 @@ class MissionPlanner:
         g, cfg = self._goal, self.cfg
         reached = math.hypot(x - g.x, y - g.y) <= cfg.arrive_radius
         if g.mode == "investigate":
+            if g.target is not None and self._dismiss_if_irrelevant(g.target, t):
+                self._goal = None  # the advisor's answer arrived on the way: not worth it
+                return None
             if reached and g.arrived_at is None:
                 g.arrived_at = t
             if g.arrived_at is not None and t - g.arrived_at >= cfg.investigate_hold:
@@ -151,7 +165,11 @@ class MissionPlanner:
         latest = min(grid.anomalies(), key=lambda a: math.hypot(a["x"] - g.x, a["y"] - g.y), default=g.target)
         if math.hypot(latest["x"] - g.x, latest["y"] - g.y) > self.cfg.match_radius:
             latest = g.target
-        self.report.append({**latest, "investigated_at": t})
+        entry = {**latest, "investigated_at": t}
+        advice = self._advice(g.target)
+        if advice is not None:
+            entry["advice"] = advice.__dict__
+        self.report.append(entry)
         self._goal = None
 
     def _return(self, grid, x, y, reason: str) -> Command:
@@ -172,14 +190,46 @@ class MissionPlanner:
         return tallest
 
     def _pending_anomalies(self, grid: GridMap) -> list[dict]:
-        done = [(r["x"], r["y"]) for r in self.report]
+        done = [(r["x"], r["y"]) for r in self.report] + [(d["x"], d["y"]) for d in self.dismissed]
         out = []
         for a in grid.anomalies():
             if self._goal and self._goal.mode == "investigate" and self._near(a, [(self._goal.x, self._goal.y)]):
                 continue
-            if not self._near(a, done) and self._in_area(a["x"], a["y"]):
-                out.append(a)
+            if self._near(a, done) or not self._in_area(a["x"], a["y"]):
+                continue
+            if self._dismiss_if_irrelevant(a, None):
+                continue
+            out.append(a)
         return out
+
+    def _advice(self, a: dict):
+        """The advisor's assessment of this anomaly, requesting one if needed; None until it arrives."""
+        if self.advisor is None:
+            return None
+        key = self._key(a)
+        res = self.advisor.result(key)
+        if res is None and self.crops is not None:
+            crop = self.crops(a)
+            if crop is not None:
+                self.advisor.request(key, crop)
+        return res
+
+    def _dismiss_if_irrelevant(self, a: dict, t: float | None) -> bool:
+        res = self._advice(a)
+        if res is None or (res.investigate and res.relevance >= self.cfg.min_relevance):
+            return False
+        if not self._near(a, [(d["x"], d["y"]) for d in self.dismissed]):
+            self.dismissed.append({**a, "advice": res.__dict__, "dismissed_at": t})
+        return True
+
+    def _key(self, a: dict) -> str:
+        """A stable id per anomaly: the map refines positions slightly as it learns."""
+        for kx, ky, key in self._keys:
+            if math.hypot(a["x"] - kx, a["y"] - ky) <= self.cfg.match_radius:
+                return key
+        key = f"anomaly-{len(self._keys)}"
+        self._keys.append((a["x"], a["y"], key))
+        return key
 
     def _candidates(self, grid: GridMap) -> list[dict]:
         confirmed = [(a["x"], a["y"]) for a in grid.anomalies()]
@@ -212,7 +262,9 @@ class MissionPlanner:
 
     def _anomaly_utility(self, a: dict, x: float, y: float) -> float:
         d = math.hypot(a["x"] - x, a["y"] - y)
-        return a["peak_novelty"] * a["hits"] / (1.0 + d / self.cfg.anomaly_distance_ref)
+        res = self._advice(a) if self.advisor is not None else None
+        relevance = res.relevance if res is not None else self.cfg.unassessed_relevance
+        return relevance * a["peak_novelty"] * a["hits"] / (1.0 + d / self.cfg.anomaly_distance_ref)
 
     def _seen_at(self, grid: GridMap, x: float, y: float) -> bool:
         r, c = grid.world_to_cell(x, y)
