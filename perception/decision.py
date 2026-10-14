@@ -1,8 +1,12 @@
 """Mission planner: map + drone state -> one waypoint command per cycle.
 
-Priorities: return/land > investigate > verify > explore. Every altitude clears the tallest
+Priorities: return/land > investigate > verify > search/explore. Every altitude clears the tallest
 thing along the path; unmapped cells are assumed unknown_height tall. An optional advisor
 (perception/advisor.py) re-ranks and dismisses anomalies against a plain-language brief.
+
+With a BeliefMap (perception/belief.py) attached, exploring becomes searching: fly to the waypoint
+and altitude whose view is expected to remove the most uncertainty about hidden objects
+(e.g. under trees), per metre flown. Confident hidden finds are logged in `hidden`.
 """
 from __future__ import annotations
 
@@ -32,6 +36,10 @@ class DecisionConfig:
     min_frontier_cells: int = 4      # ignore frontier scraps smaller than this
     anomaly_distance_ref: float = 15.0  # m; anomaly utility halves at this distance
     verify_candidates: bool = True
+    search_altitudes: tuple[float, ...] | None = None  # belief search: AGLs to consider (default cruise, investigate)
+    search_spacing: float = 3.0      # m between candidate search waypoints
+    search_energy: float = 0.05      # bits a metre of flight must be worth
+    min_search_gain: float = 0.5     # bits: below this, fall back to frontier exploring
     min_relevance: float = 0.3       # advisor: anomalies judged less relevant to the brief are dismissed
     unassessed_relevance: float = 1.0  # advisor: priority weight until its answer arrives (don't wait)
 
@@ -42,7 +50,7 @@ class DecisionConfig:
 
 @dataclass
 class Command:
-    mode: str                        # "explore", "investigate", "verify", "return", "land"
+    mode: str                        # "search", "explore", "investigate", "verify", "return", "land"
     x: float
     y: float
     agl: float                       # target altitude above ground, m
@@ -58,6 +66,7 @@ class _Goal:
     y: float
     target: dict | None = None
     arrived_at: float | None = None
+    agl: float | None = None
 
 
 @dataclass
@@ -71,6 +80,10 @@ class MissionPlanner:
     advisor: object | None = None
     crops: Callable[[dict], np.ndarray | None] | None = None
     dismissed: list[dict] = field(default_factory=list)  # anomalies the advisor ruled out, with its reason
+    # Optional belief search: a BeliefMap fed alongside the GridMap.
+    # `hidden` logs confident finds: {"kind": "object" | "void", "x", "y", "p", "found_at"}.
+    belief: object | None = None
+    hidden: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         self._goal: _Goal | None = None
@@ -99,8 +112,9 @@ class MissionPlanner:
             return self._return(grid, x, y, "returning")
 
         # Finish the current goal unless a newly confirmed anomaly should interrupt exploring.
+        self._log_hidden(t)
         pending = self._pending_anomalies(grid)
-        if self._goal and not (self._goal.mode in ("explore", "verify") and pending):
+        if self._goal and not (self._goal.mode in ("search", "explore", "verify") and pending):
             cmd = self._continue(grid, x, y, t)
             if cmd is not None:
                 return cmd
@@ -122,7 +136,13 @@ class MissionPlanner:
                 return self._go(grid, x, y, "verify", best["x"], best["y"], cfg.cruise_agl,
                                 "seen as unusual once: look again", best)
 
-        # 4. Explore.
+        # 4. Search (with a belief map) or explore.
+        if self.belief is not None:
+            target = self._search_target(grid, x, y)
+            if target is not None:
+                sx, sy, sagl, gain = target
+                self._goal = _Goal("search", sx, sy, agl=sagl)
+                return self._go(grid, x, y, "search", sx, sy, sagl, f"expected {gain:.1f} bits of hidden information")
         frontier = self._frontier_target(grid, x, y)
         if frontier is not None:
             fx, fy, size = frontier
@@ -152,6 +172,11 @@ class MissionPlanner:
                 self._goal = None
                 return None
             return self._go(grid, x, y, "verify", g.x, g.y, cfg.cruise_agl, "looking again", g.target)
+        if g.mode == "search":
+            if reached:
+                self._goal = None
+                return None
+            return self._go(grid, x, y, "search", g.x, g.y, g.agl, "searching")
         if g.mode == "explore":
             seen_now = self._seen_at(grid, g.x, g.y)
             if reached or seen_now:  # the target got mapped on the way: pick a new one
@@ -259,6 +284,37 @@ class MissionPlanner:
             if u > best_u:
                 best, best_u = (float(wx[i]), float(wy[i]), len(rr)), u
         return best
+
+    def _search_target(self, grid: GridMap, x: float, y: float):
+        """(x, y, agl, gain) of the candidate waypoint with the best expected gain minus flight cost,
+        or None when nothing is worth min_search_gain. The altitude is raised to what's safe there,
+        and the gain judged at that altitude."""
+        cfg = self.cfg
+        if cfg.area is None:
+            return None
+        x0, x1, y0, y1 = cfg.area
+        alts = cfg.search_altitudes or (cfg.cruise_agl, cfg.investigate_agl)
+        best, best_u = None, cfg.min_search_gain
+        for tx in np.arange(x0 + cfg.search_spacing / 2, x1, cfg.search_spacing):
+            for ty in np.arange(y0 + cfg.search_spacing / 2, y1, cfg.search_spacing):
+                h = grid.clearance(float(tx), float(ty), cfg.clearance_radius)
+                floor = (cfg.unknown_height if math.isnan(h) else h) + cfg.min_clearance
+                d = math.hypot(tx - x, ty - y)
+                for agl in sorted({max(a, floor) for a in alts}):
+                    gain = self.belief.expected_gain(float(tx), float(ty), agl)
+                    u = gain - cfg.search_energy * d
+                    if u > best_u:
+                        best, best_u = (float(tx), float(ty), agl, gain), u
+        return best
+
+    def _log_hidden(self, t: float) -> None:
+        if self.belief is None:
+            return
+        for kind, name in (("object", "object"), ("subsurface", "void")):
+            for det in self.belief.detections(kind):
+                known = [(h["x"], h["y"]) for h in self.hidden if h["kind"] == name]
+                if not any(math.hypot(det["x"] - kx, det["y"] - ky) <= 3.0 for kx, ky in known):
+                    self.hidden.append({"kind": name, "x": det["x"], "y": det["y"], "p": det["p"], "found_at": t})
 
     def _anomaly_utility(self, a: dict, x: float, y: float) -> float:
         d = math.hypot(a["x"] - x, a["y"] - y)

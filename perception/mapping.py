@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Protocol
 
 import cv2
@@ -94,16 +95,67 @@ class GridMap:
 
     def update(self, frame, t_world_cam: np.ndarray, pose_cov: np.ndarray | None = None) -> bool:
         """Add one SceneFrame (needs frame.terrain). Returns False if it couldn't be placed."""
+        p = self.project(frame, t_world_cam, pose_cov)
+        if p is None:
+            return False
+        cfg = self.cfg
+        idx, w, h, hk, xy = p.idx, p.weight, p.height, p.height_ok, p.xyz
+
+        # Cells without a measured height are placed as if on the ground, which is fine for
+        # regions and coverage but would corrupt the height and elevation layers.
+        np.add.at(self._w, idx, w)
+        np.add.at(self._hw, idx[hk], w[hk])
+        np.add.at(self._hsum, idx[hk], (w * h)[hk])
+        np.add.at(self._zsum, idx[hk], (w * xy[:, 2])[hk])
+
+        # At most one hit per map cell per frame, spread to its neighbours.
+        nv = p.novelty
+        nk = np.isfinite(nv)
+        if nk.any():
+            np.maximum.at(self._peak, idx[nk], nv[nk])
+            strong = idx[nk & (nv >= cfg.hit_z)]
+            if strong.size:
+                hit = np.zeros(self._w.size, np.uint8)
+                hit[strong] = 1
+                if cfg.hit_radius > 0:
+                    k = 2 * cfg.hit_radius + 1
+                    hit = cv2.dilate(hit.reshape(self.shape), np.ones((k, k), np.uint8)).ravel()
+                self._hits += hit
+
+        for rid in np.unique(p.regions):
+            slot = self._slot(int(rid))
+            if slot is not None:
+                m = p.regions == rid
+                np.add.at(self._votes[:, slot], idx[m], w[m])
+
+        seen = np.unique(idx)
+        self._seen[seen] += 1
+        self._last[seen] = frame.t
+        self.frames += 1
+        return True
+
+    def project(self, frame, t_world_cam: np.ndarray, pose_cov: np.ndarray | None = None):
+        """Where each scene cell's sub-points land in the map, with what they observed.
+
+        Returns None if the frame has no ground plane; otherwise a namespace of per-sample arrays:
+        idx (flat map cell of the observed surface), idx_ground (where the same ray meets the ground),
+        weight, height (m above ground) and height_ok, novelty, regions, roughness (NaN if the frame
+        has none), depth (m along the optical axis), xyz (world).
+        Grows the grid to fit. Shared by update() and the belief map.
+        """
         terrain = frame.terrain
         if terrain is None or terrain.plane is None:
-            return False
+            return None
         cfg = self.cfg
         gh, gw = frame.regions.shape
         n, d = np.asarray(terrain.plane[:3]), float(terrain.plane[3])
 
-        # Sub-points of every scene cell, as rays in the rectified camera.
-        s = cfg.samples_per_cell
+        # Sub-points of every scene cell, as rays in the rectified camera. Dense enough that they
+        # land closer together than map cells (a scene cell spans altitude * cell_px / f metres),
+        # so no map cell under the camera is skipped.
         cw, ch = self.image_size[0] / gw, self.image_size[1] / gh
+        span = max(d, 1e-3) * max(cw / self.rig.fx, ch / self.rig.fy)
+        s = int(np.clip(math.ceil(span / (0.7 * cfg.resolution)), cfg.samples_per_cell, 12))
         sub = (np.arange(s) + 0.5) / s
         u = ((np.arange(gw)[:, None] + sub[None]) * cw).ravel()
         v = ((np.arange(gh)[:, None] + sub[None]) * ch).ravel()
@@ -126,48 +178,24 @@ class GridMap:
             sigma = math.sqrt(max(float(np.trace(np.asarray(pose_cov)[:2, :2])) / 2, 0.0))
             weight = weight / (1.0 + (sigma / cfg.pose_sigma_ref) ** 2)
 
-        novelty = cell(frame.novelty)
-        regions = cell(frame.regions)
+        rough = getattr(terrain, "roughness", None)
         sel = good.ravel()
-        xy = pts.reshape(-1, 3)[sel]
-        self._ensure(xy[:, 0], xy[:, 1])
-        idx = self._flat_index(xy[:, 0], xy[:, 1])
-        w = weight.ravel()[sel]
-        h = height.ravel()[sel]
-        hk = h_ok.ravel()[sel]
-
-        # Cells without a measured height are placed as if on the ground, which is fine for
-        # regions and coverage but would corrupt the height and elevation layers.
-        np.add.at(self._w, idx, w)
-        np.add.at(self._hw, idx[hk], w[hk])
-        np.add.at(self._hsum, idx[hk], (w * h)[hk])
-        np.add.at(self._zsum, idx[hk], (w * xy[:, 2])[hk])
-
-        # At most one hit per map cell per frame, spread to its neighbours.
-        nv = novelty.ravel()[sel]
-        nk = np.isfinite(nv)
-        if nk.any():
-            np.maximum.at(self._peak, idx[nk], nv[nk])
-            strong = idx[nk & (nv >= cfg.hit_z)]
-            if strong.size:
-                hit = np.zeros(self._w.size, np.uint8)
-                hit[strong] = 1
-                if cfg.hit_radius > 0:
-                    k = 2 * cfg.hit_radius + 1
-                    hit = cv2.dilate(hit.reshape(self.shape), np.ones((k, k), np.uint8)).ravel()
-                self._hits += hit
-
-        for rid in np.unique(regions.ravel()[sel]):
-            slot = self._slot(int(rid))
-            if slot is not None:
-                m = regions.ravel()[sel] == rid
-                np.add.at(self._votes[:, slot], idx[m], w[m])
-
-        seen = np.unique(idx)
-        self._seen[seen] += 1
-        self._last[seen] = frame.t
-        self.frames += 1
-        return True
+        if not sel.any():
+            return None  # nothing in front of the camera (e.g. flying inside a canopy)
+        xyz = pts.reshape(-1, 3)[sel]
+        # Where the same rays meet the ground: what a glimpse through a gap in a canopy actually shows.
+        depth0 = -d / np.where(np.abs(denom) < 1e-9, np.nan, denom)
+        ground = ((rays * depth0[..., None]) @ t_world_cam[:3, :3].T + t_world_cam[:3, 3]).reshape(-1, 3)[sel]
+        ground_ok = np.isfinite(ground[:, 0]) & (depth0.ravel()[sel] > 0)
+        ground[~ground_ok] = xyz[~ground_ok]
+        self._ensure(np.concatenate([xyz[:, 0], ground[:, 0]]), np.concatenate([xyz[:, 1], ground[:, 1]]))
+        return SimpleNamespace(
+            idx=self._flat_index(xyz[:, 0], xyz[:, 1]), idx_ground=self._flat_index(ground[:, 0], ground[:, 1]),
+            weight=weight.ravel()[sel],
+            height=height.ravel()[sel], height_ok=h_ok.ravel()[sel],
+            novelty=cell(frame.novelty).ravel()[sel], regions=cell(frame.regions).ravel()[sel],
+            roughness=(cell(rough).ravel()[sel] if rough is not None else np.full(int(sel.sum()), np.nan)),
+            depth=depth.ravel()[sel], xyz=xyz)
 
     @property
     def height(self) -> np.ndarray:

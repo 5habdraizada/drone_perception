@@ -1,10 +1,12 @@
 """A whole autonomous mission in simulation: take off, explore, investigate, come home, land.
 
-    python -m demos.mission [--battery 1.0] [--false-alarms 0.1] [--out out/mission_demo.png]
+    python -m demos.mission [--battery 1.0] [--false-alarms 0.1] [--search] [--out out/mission_demo.png]
 
 Uses oracle perception (exact frames from the scene) so a mission takes seconds;
 the real pipeline is exercised by demos/map.py. Prints every change of
 mode with its reason, the investigation report, and draws the flown path on the map.
+--search adds trees hiding an object to the scene and gives the planner a belief map:
+exploring becomes information search.
 """
 from __future__ import annotations
 
@@ -15,13 +17,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from perception.belief import BeliefMap
 from perception.decision import DecisionConfig, MissionPlanner
 from perception.mapping import GridMap
 from sim.mission import DroneSim, run_mission
 from sim.oracle_perception import OraclePerception
 from sim.scenes import FRAME, RIG, flight_scene
+from sim.synthetic_stereo import Block
 
-COLOURS = {"explore": (200, 200, 200), "verify": (0, 200, 255), "investigate": (0, 0, 255),
+COLOURS = {"search": (255, 0, 255), "explore": (200, 200, 200), "verify": (0, 200, 255), "investigate": (0, 0, 255),
            "return": (255, 120, 0), "land": (0, 255, 0)}
 
 
@@ -29,14 +33,20 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--battery", type=float, default=1.0)
     ap.add_argument("--false-alarms", type=float, default=0.1, help="chance per frame of a one-frame false alarm")
+    ap.add_argument("--search", action="store_true", help="hidden targets + belief-map information search")
     ap.add_argument("--out", default="out/mission_demo.png")
     args = ap.parse_args(argv)
 
     scene = flight_scene()
     area = (-12.0, 12.0, -6.0, 6.0)
+    if args.search:
+        scene.blocks += [Block(5.0, 3.5, 5.0, 4.0, 3.0, pattern="canopy"),
+                         Block(5.5, 3.5, 0.8, 0.8, 0.0, pattern="hidden")]
     perception = OraclePerception(scene, RIG, FRAME, false_alarm_rate=args.false_alarms, seed=2)
     grid = GridMap(RIG, FRAME)
     planner = MissionPlanner(home=(-11.0, -5.0), cfg=DecisionConfig(area=area))
+    if args.search:
+        planner.belief = BeliefMap(grid, RIG, FRAME)
     drone = DroneSim(-11.0, -5.0, battery=args.battery)
     res = run_mission(perception, grid, planner, drone)
 
@@ -56,6 +66,11 @@ def main(argv=None) -> None:
     for a in planner.report:
         print(f"  ({a['x']:+.1f}, {a['y']:+.1f}) height {a['height']:.2f} m, peak z {a['peak_novelty']:.1f}, "
               f"hits {a['hits']}, at t={a['investigated_at']:.0f} s")
+
+    if args.search:
+        print("hidden finds (truth: object (+5.5, +3.5) under trees):")
+        for h in planner.hidden:
+            print(f"  {h['kind']:6s} ({h['x']:+.1f}, {h['y']:+.1f}) p {h['p']:.2f} at t={h['found_at']:.0f} s")
 
     # Height map with the flown path, coloured by mode.
     scale = 6

@@ -49,12 +49,16 @@ class MissionResult:
 
 def run_mission(perception, grid: GridMap, planner: MissionPlanner, drone: DroneSim,
                 max_steps: int = 2000, dt: float = 1.0, sigma_growth: float = 0.0) -> MissionResult:
-    """sigma_growth: metres of position uncertainty added per second (e.g. drifting without fixes)."""
+    """sigma_growth: metres of position uncertainty added per second (e.g. drifting without fixes).
+    If the planner has a belief map, frames feed it too."""
     result = MissionResult(grid=grid, planner=planner)
     for i in range(max_steps):
         t = i * dt
         if drone.agl > 0.5:
-            grid.update(perception.frame(drone.x, drone.y, drone.agl, t), perception.pose(drone.x, drone.y, drone.agl))
+            frame, pose = perception.frame(drone.x, drone.y, drone.agl, t), perception.pose(drone.x, drone.y, drone.agl)
+            grid.update(frame, pose)
+            if planner.belief is not None:
+                planner.belief.observe(frame, pose)
         cmd = planner.decide(grid, drone.x, drone.y, drone.agl, drone.battery, drone.pose_sigma, t)
         result.trace.append({"t": t, "x": drone.x, "y": drone.y, "agl": drone.agl, "battery": drone.battery,
                              "mode": cmd.mode, "reason": cmd.reason, "tx": cmd.x, "ty": cmd.y, "tagl": cmd.agl})

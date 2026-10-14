@@ -5,6 +5,12 @@ terrain under it with a downward stereo camera pair, learns what the scene
 normally looks like, flags anything unusual, builds a map of all of it in the
 world frame, and plans where to fly next.
 
+Beyond what the cameras see directly, it keeps a **belief map of what can't be
+seen**: objects hidden under tree canopy, and signs of voids underground
+(ground depressions). The uncertainty in that
+map is the **reward signal**: the planner, or a reinforcement-learning agent,
+flies where it expects to learn the most about hidden things.
+
 Everything runs on the CPU in fp32 (NumPy, OpenCV, ONNX Runtime), with no
 model quantisation and no GPU required. The target computer is a Qualcomm
 RB3 Gen 2.
@@ -44,6 +50,8 @@ ground truth. It has **not yet run on real images**; see
 | What kinds of surface are there? | `scene.py` | regions with ids that stay stable over time |
 | Is anything unusual? | `scene.py` | novelty z-score per cell |
 | Where is everything in the world? | `mapping.py` | map of height, elevation, regions and anomalies |
+| What might be hidden under trees, or underground? | `belief.py` | probability maps, confident finds |
+| How much would flying there reveal? | `belief.py` | expected information gain (bits): the reward |
 | Where should I fly next? | `decision.py` | one waypoint command per cycle |
 
 **Ownership:**
@@ -70,6 +78,10 @@ right camera ┘  (calibration)   StereoBM + RANSAC plane           │  height 
 control team: pose ─────────────────────────────────────► GridMap (world frame)
                                                                   │  height, elevation, regions,
                                                                   │  anomaly hits, coverage
+                                                                  │
+                           BeliefMap ◄────────────────────────────┤  frames + map
+                           P(hidden object), P(void),             │
+                           entropy, expected gain ───────────────►│
                                                                   ▼
 battery, pose uncertainty ──────────────────────────────► MissionPlanner ──► waypoint (x, y, altitude)
                                                                               to the control team
@@ -98,6 +110,7 @@ perception/            the onboard library
   backbone.py          appearance features from an ONNX model
   scene.py             regions and novelty, learned online
   mapping.py           world-frame grid map, pose helpers
+  belief.py            hidden objects and signs of voids: beliefs, entropy, expected gain (the reward)
   decision.py          mission planner
   pipeline.py          one stereo pair through rectify -> terrain -> scene -> map
 tools/                 command-line tools for real data
@@ -111,12 +124,14 @@ tools/                 command-line tools for real data
   bench_backbone.py    compare models: speed, separability, feature visualisation
   viz.py               drawing helpers
 demos/                 synthetic demos with ground truth
-  terrain.py  scene.py  map.py  mission.py  real_area.py
+  terrain.py  scene.py  map.py  mission.py  real_area.py  search_benchmark.py
 sim/                   simulator used by tests and demos
   synthetic_stereo.py  ray-traced stereo images of a heightfield world
   synthetic_board.py   checkerboard images through real lens models
   oracle_perception.py exact perception frames, for fast mission tests
   mission.py           closed-loop mission simulation
+  search_env.py        RL environment: search for hidden targets, reward = information
+  search_policies.py   random, lawnmower and information-greedy policies
   scenes.py            shared scenes and the simulated rig
   real_world.py        real places: orthophoto draped over a LiDAR surface model
 tests/                 pytest suite, one file per module
@@ -164,6 +179,8 @@ python -m demos.terrain      # terrain on one stereo pair vs ground truth
 python -m demos.scene        # regions and novelty along a flight
 python -m demos.map          # full chain into the world map, checked against truth
 python -m demos.mission      # a complete autonomous mission (seconds; uses oracle perception)
+python -m demos.mission --search     # the same, searching for an object hidden under trees
+python -m demos.search_benchmark     # is the reward meaningful? policies compared on random scenes
 ```
 
 To watch everything the pipeline produces, frame by frame:
@@ -503,7 +520,12 @@ the target anomaly if any. The first rule that applies wins:
    It lands on reaching home.
 2. **investigate:** a confirmed anomaly not yet visited. The best is chosen by peak novelty × hits ÷ distance. The drone descends to `investigate_agl` (4 m), holds for 5 s, then records it in `planner.report`.
 3. **verify:** a spot that looked unusual only once. The drone flies back over it so the map can confirm or dismiss it.
-4. **explore:** the most useful frontier inside `area`, weighing size against distance.
+4. **search** (with a belief map attached): the waypoint and altitude with the highest
+   expected information gain minus a cost per metre (`search_energy`), over a lattice of
+   candidates in `area`; altitudes from `search_altitudes` (default cruise and investigate),
+   raised to what's safe there. Confident hidden finds are logged in `planner.hidden`.
+5. **explore:** the most useful frontier inside `area`, weighing size against distance.
+   Without a belief map, or when no search target is worth `min_search_gain` bits.
 
 The current goal is kept until it's reached. Only a return, or a newly
 confirmed anomaly while exploring, interrupts it.
@@ -520,7 +542,38 @@ assumed to be `unknown_height` (3 m) tall, because the cameras can't see ahead.
 - Clears mapped obstacles.
 - Flies at most 3× an ideal back-and-forth sweep, with no zig-zagging. A typical mission: 49 s, 95 m.
 
-### 8.7 `pipeline.py`
+### 8.7 `belief.py`: hidden targets and the reward
+
+The camera map records what is visible. `BeliefMap` keeps, on the same grid, the
+probability of two things that are **not** directly visible:
+
+| Hypothesis | Raised by | Lowered by |
+|---|---|---|
+| **Hidden object** at ground level (e.g. under trees) | a novelty hit, placed where the ray meets the ground, not on the canopy top | a clear view of the ground that finds nothing |
+| **Buried void** (indirect) | ground depressions, clearly seen | nothing yet: no sensor sees underground |
+
+**How views count:**
+- Evidence comes from *improving on the best look so far*. Seeing the same spot again
+  from the same height adds nothing; a closer look does. This keeps repeated frames from
+  being counted as independent evidence.
+- View quality falls with range. **Canopy** (a raised, rough surface) only lets part of
+  the ground through its gaps, more when close: a high pass over trees barely clears them,
+  a low pass does. **Roofs** (raised and smooth) are not searchable at all.
+- Occlusion: the expected gain checks line of sight, so ground hidden behind a tree's edge
+  is only worth something from a viewpoint that can actually see it.
+
+**The reward signal:**
+- `entropy(area)`: remaining uncertainty in bits, for objects, voids and in total.
+- `expected_gain(x, y, agl)`: about how many bits a view from there would remove. The planner maximises this; an RL agent is
+  rewarded with the entropy actually removed.
+- `detections(kind)`: confident finds (`"object"` or `"subsurface"`).
+
+**Usage:** call `belief.observe(frame, pose)` next to `grid.update(frame, pose)`.
+
+**Measured (tests):** under trees, a low pass finds an object that high passes miss;
+ground next to a tree's edge is only scored as seen after a pass from the side.
+
+### 8.8 `pipeline.py`
 
 - `Pipeline(rig, size, rectifier=None, backbone_path=None, ...)` or `Pipeline.from_calibration(path)`.
 - `process(t, left, right, t_world_left=None, pose_cov=None)` returns a `FrameResult`: the rectified image, terrain, scene, whether the frame was mapped, and timing for each stage.
@@ -587,8 +640,31 @@ class PoseSource(Protocol):
   roof edges, because the orthophoto only sees from above; shadows are baked into the photo.
 - **`sim/oracle_perception.py`** produces the frames a perfect pipeline would output, so full missions run in seconds.
 - **`sim/mission.py`** runs the closed loop: perception → map → planner → drone kinematics with a battery model.
+  If the planner has a belief map, frames feed it too.
+- **`sim/search_env.py`** is a reinforcement-learning environment (Gymnasium-style
+  `reset()` / `step()`, no dependency): random scenes with roofs and trees hiding objects.
+  16 actions (8 directions × cruise 20 m or low 8 m).
+  Observation: an egocentric window of the belief layers plus position and time.
+  **Reward** = bits of uncertainty removed + 20 per hidden object found − 10 per false
+  find − 0.05 per metre flown − 100 for a crash.
+- **`sim/search_policies.py`**: random, lawnmower (sweep at cruise) and information-greedy
+  (best `expected_gain` minus energy, flying low only over mapped ground).
 
-There are 77 tests, one file per module, plus `test_pipeline.py` for the data
+**Is the reward meaningful?** `python -m demos.search_benchmark`, 8 random scenes × 150 steps,
+14 hidden objects in total:
+
+| Policy | Mean reward | Uncertainty removed | Objects found | False finds | Crashes | Flown |
+|---|---|---|---|---|---|---|
+| random | 13 | 26% | 1/14 | 0 | 0 | 1489 m |
+| lawnmower | 233 | 83% | 0/14 | 0 | 0 | 749 m |
+| **information-greedy** | **253** | **84%** | **6/14** | 0 | 0 | 747 m |
+
+- Following the reward finds the most hidden objects, with no learning. The lawnmower removes
+  about as much uncertainty but never flies low, so it finds none of the objects under trees.
+- Greedy still misses more than half. It's one step ahead only, and low passes over trees have
+  small footprints. That gap is what an RL policy trained on this reward has to close.
+
+There are 104 tests, one file per module, plus `test_pipeline.py` for the data
 tools. Tests marked `slow` render images; skip them with `-m "not slow"`.
 
 **Limit of these tests:** the simulator shares the code's assumptions (pinhole
@@ -674,7 +750,9 @@ It is a fixed-wing aircraft at about 85 m with downward stereo (0.78 m baseline)
 | Novelty from a memory bank, not distance to cluster centres | Distance to a centre in 259 dimensions is mostly noise; nearest-neighbour distance tracks what was actually seen |
 | Anomalies confirmed by hits in separate frames, with no negative evidence | Rejects one-frame noise, and survives the scene model getting used to the object |
 | Unmapped space assumed tall | The cameras only look down |
-| Quantum gravimetry left out of the onboard code | No sensor on board. A simulated gravity layer would only serve the pitch; if needed, it belongs outside the drone code. |
+| Hidden targets as a probability map; reward = entropy removed | One currency (bits) for every sensor and target type; the same quantity drives the planner and trains RL |
+| Evidence only from a better view than before | Repeated frames are not independent; counting them would make the drone hover |
+| No gravimeter, real or simulated | There is no sensor on board, and simulated readings would only show assumed noise levels |
 
 ---
 
@@ -687,6 +765,10 @@ It is a fixed-wing aircraft at about 85 m with downward stereo (0.78 m baseline)
 - **No forward-looking sensor.** Obstacles ahead are only known once they've been mapped from above; unmapped space is assumed to be 3 m tall.
 - **Exploration uses frontiers,** about 2.2× an ideal back-and-forth sweep including the return. A dedicated sweep pattern would be more efficient for known rectangular areas.
 - **The mission simulator's kinematics are idealised** (no wind, no inertia).
+- **The belief map is tested on oracle perception only.** Novelty hits under real canopy,
+  and canopy/roof classification from real roughness, still need real data.
+- **Underground: indirect cues only.** Ground depressions raise the void belief, but nothing
+  on board senses underground, so voids without a surface sign stay invisible.
 - **Edges blur in the map** by about one cell, so map-cell heights at object edges are averages.
 
 **Next steps:**

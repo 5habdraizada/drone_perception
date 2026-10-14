@@ -4,8 +4,9 @@ Rendering stereo pairs and running the real pipeline takes seconds per frame;
 whole missions need hundreds of frames. This produces what a perfect
 terrain + scene pipeline would output for a camera looking straight down:
 cell heights from ray casting against the scene's blocks (walls give no data),
-a region per block, and high novelty on "stripes" blocks. Optional random
-one-frame false alarms check that the map and planner don't chase noise.
+a region per block, roughness (canopy is rough), and high novelty on unusual
+objects; objects hidden under canopy are only glimpsed now and then. Optional
+random one-frame false alarms check that the map and planner don't chase noise.
 """
 from __future__ import annotations
 
@@ -22,7 +23,12 @@ _R_DOWN = np.diag([1.0, -1.0, -1.0])  # camera x = world x, camera y = world -y,
 class OraclePerception:
     def __init__(self, scene: Scene, rig: StereoRig, image_size=(640, 352), grid=(20, 11),
                  novel_z: float = 6.0, false_alarm_rate: float = 0.0, seed: int = 0):
-        """false_alarm_rate: chance per frame of one random cell scoring novel_z for that frame only."""
+        """false_alarm_rate: chance per frame of one random cell scoring novel_z for that frame only.
+
+        Block patterns: "stripes" (an unusual object), "canopy" (tree canopy: rough, hides the
+        ground), "hidden" (an object on the ground, glimpsed under canopy with probability
+        glimpse_low below low_agl metres, glimpse_high above)."""
+        self.glimpse_low, self.glimpse_high, self.low_agl = 0.6, 0.1, 12.0
         self.scene, self.rig = scene, rig
         self.novel_z, self.false_alarm_rate = novel_z, false_alarm_rate
         self.rng = np.random.default_rng(seed)
@@ -47,7 +53,11 @@ class OraclePerception:
         novelty = np.zeros((gh, gw))
         done = np.zeros((gh, gw), bool)
 
-        blocks = sorted(enumerate(self.scene.blocks), key=lambda kb: -kb[1].h)
+        rough = np.full((gh, gw), 0.02)
+        canopy = np.zeros((gh, gw), bool)
+        hidden = [kb for kb in enumerate(self.scene.blocks) if kb[1].pattern == "hidden"]
+        blocks = sorted((kb for kb in enumerate(self.scene.blocks) if kb[1].pattern != "hidden"),
+                        key=lambda kb: -kb[1].h)
         # Structures, tallest first: a ray takes the first top it meets.
         for k, b in blocks:
             if b.h <= 0:
@@ -57,6 +67,8 @@ class OraclePerception:
             done |= hit
             if b.pattern == "stripes":
                 novelty[hit] = self.novel_z
+            if b.pattern == "canopy":
+                rough[hit], canopy = 0.3, canopy | hit
         # Ground, unless the ground point is inside a block's footprint (then it's a wall, or a pit).
         ground = centre + agl * self.rays
         in_any = np.zeros((gh, gw), bool)
@@ -78,9 +90,18 @@ class OraclePerception:
                 height[hit], regions[hit] = b.h, k + 1
                 done |= hit
 
+        # Objects on the ground: in the open they're plainly unusual; under canopy they're only
+        # glimpsed through gaps, far more often on a low pass.
+        p_glimpse = self.glimpse_low if agl < self.low_agl else self.glimpse_high
+        for k, b in hidden:
+            under = self._inside(b, ground)
+            novelty[under & flat] = self.novel_z
+            seen = under & canopy & (self.rng.random((gh, gw)) < p_glimpse)
+            novelty[seen] = self.novel_z
+
         if self.rng.random() < self.false_alarm_rate:
             novelty[self.rng.integers(gh), self.rng.integers(gw)] = self.novel_z
-        terrain = SimpleNamespace(plane=np.array([0.0, 0.0, -1.0, agl]), cell_height=height)
+        terrain = SimpleNamespace(plane=np.array([0.0, 0.0, -1.0, agl]), cell_height=height, roughness=rough)
         return SimpleNamespace(t=t, regions=regions, novelty=novelty, terrain=terrain)
 
     @staticmethod

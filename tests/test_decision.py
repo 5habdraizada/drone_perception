@@ -4,6 +4,7 @@ import math
 import numpy as np
 import pytest
 
+from perception.belief import BeliefMap
 from perception.decision import DecisionConfig, MissionPlanner
 from perception.mapping import GridMap
 from perception.terrain import StereoRig
@@ -105,3 +106,15 @@ def test_explores_without_dithering():
     flown = sum(math.hypot(dx, dy) for dx, dy in steps)
     area = (BIG[1] - BIG[0]) * (BIG[3] - BIG[2])
     assert flown < 3.0 * area / 7.3  # within 3x an ideal sweep (7.3 m swath) including the way home
+
+
+def test_belief_search_finds_an_object_hidden_under_trees():
+    trees, hidden = Block(4.0, 2.0, 4.0, 4.0, 3.0, pattern="canopy"), Block(4.0, 2.0, 0.8, 0.8, 0.0, pattern="hidden")
+    perception = OraclePerception(_scene(trees, hidden), RIG, SIZE, seed=1)
+    grid = GridMap(RIG, SIZE)
+    planner = MissionPlanner(home=(0.0, 0.0), cfg=DecisionConfig(area=AREA, verify_candidates=False),
+                             belief=BeliefMap(grid, RIG, SIZE))
+    res = run_mission(perception, grid, planner, DroneSim(0.0, 0.0))
+    assert res.landed and "search" in _modes(res)
+    objects = [h for h in planner.hidden if h["kind"] == "object"]
+    assert any(math.hypot(h["x"] - hidden.x, h["y"] - hidden.y) < 1.5 for h in objects)
