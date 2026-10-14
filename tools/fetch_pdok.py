@@ -26,10 +26,26 @@ WCS = ("https://service.pdok.nl/rws/ahn/wcs/v1_0?service=WCS&version=2.0.1&reque
 WMS = ("https://service.pdok.nl/hwh/luchtfotorgb/wms/v1_0?service=WMS&version=1.3.0&request=GetMap"
        "&layers={layer}&styles=&crs=EPSG:28992&bbox={x0},{y0},{x1},{y1}&width={w}&height={h}&format=image/jpeg")
 MAX_PX = 2500  # the WMS refuses larger images
+BGT = ("https://api.pdok.nl/lv/bgt/ogc/v1/collections/{coll}/items?bbox={x0},{y0},{x1},{y1}"
+       "&bbox-crs=http://www.opengis.net/def/crs/EPSG/0/28992&crs=http://www.opengis.net/def/crs/EPSG/0/28992"
+       "&limit=1000&f=json")
+BGT_COLLECTIONS = ("pand", "waterdeel", "wegdeel", "begroeidterreindeel", "onbegroeidterreindeel")
 
 
 def fetch(url: str, path: Path) -> None:
     subprocess.run(["curl", "-sS", "-f", "-o", str(path), url], check=True)
+
+
+def fetch_bgt(coll: str, bbox, path: Path) -> None:
+    """All features of one BGT collection in the box (following 'next' pages) as one GeoJSON file.
+    BGT: Basisregistratie Grootschalige Topografie via PDOK, open data (CC0)."""
+    url = BGT.format(coll=coll, x0=bbox[0], y0=bbox[1], x1=bbox[2], y1=bbox[3])
+    features = []
+    while url:
+        page = json.loads(subprocess.run(["curl", "-sS", "-f", url], check=True, capture_output=True).stdout)
+        features += page.get("features", [])
+        url = next((ln["href"] for ln in page.get("links", []) if ln.get("rel") == "next"), None)
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": features}))
 
 
 def main(argv=None) -> None:
@@ -39,6 +55,8 @@ def main(argv=None) -> None:
     ap.add_argument("--ortho-layer", default="2022_orthoHR", help="WMS layer; match the AHN4 years (2020-2022)")
     ap.add_argument("--ortho-res", type=float, default=0.08)
     ap.add_argument("--out", default="data/nl")
+    ap.add_argument("--bgt", action="store_true",
+                    help="also fetch BGT topography (buildings, water, roads, green space) as GeoJSON, for labels")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -66,6 +84,9 @@ def main(argv=None) -> None:
             tile.unlink()
         rows.append(np.hstack(row))
     cv2.imwrite(str(out / "ortho.png"), np.vstack(rows))
+    if args.bgt:
+        for coll in BGT_COLLECTIONS:
+            fetch_bgt(coll, (x0, y0, x1, y1), out / f"bgt_{coll}.json")
     (out / "area.json").write_text(json.dumps({
         "crs": "EPSG:28992", "bbox": [x0, y0, x1, y1], "dem_resolution": 0.5,
         "ortho_resolution": args.size / (tile_px * n), "ortho_layer": args.ortho_layer,

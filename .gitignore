@@ -8,3 +8,6 @@ calib_captures/
 models/*.onnx
 !models/resnet18.onnx
 data/
+models/smolvlm*/
+models/clip-vit-b32/
+models/remoteclip/
